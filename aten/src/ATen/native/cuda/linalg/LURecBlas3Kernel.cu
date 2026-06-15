@@ -60,6 +60,7 @@ void lu_batched_blas3_kernel_impl(
   // Disable TF32 in GEMMs for accuracy
   NoTF32Guard disable_tf32;
 
+  // Real/Complex panel config
   LUNbConfig nbc;
   if constexpr (c10::is_complex<scalar_t>::value) {
     nbc = tuning.nb_complex;
