@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/CUDABlas.h>
 #include <c10/util/complex.h>
+#include <ATen/native/cuda/MiscUtils.h>
 
 
 namespace at::native {
@@ -135,11 +136,12 @@ void lu_batched_blas3_kernel_impl(
 
 void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Tensor& infos) {
   const auto tuning = get_tuning();
-  int batch_count = batchCount(input);
-  int m = input.size(-2);
-  int n = input.size(-1);
+  int batch_count = cuda_int_cast(batchCount(input), "batchCount");
+  int m = cuda_int_cast(input.size(-2), "input.size(-2)");
+  int n = cuda_int_cast(input.size(-1), "input.size(-1)");
   int64_t matrix_stride = matrixStride(input);
-  int lda = std::max<int>(input.stride(-1), std::max(1, m));
+  // Assuming column-major input with lda >= max(1, m)
+  int lda = std::max(cuda_int_cast(input.stride(-1), "input.stride(-1)"), std::max(1, m));
 
   AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "linalg_lu_batched_blas3_kernel", [&] {
     lu_batched_blas3_kernel_impl<scalar_t>(
