@@ -45,7 +45,21 @@ inline LUTuning get_tuning() {
   };
 }
 
-template<typename scalar_t>
+template <typename scalar_t>
+void lu_batched_blas3_kernel_rec(
+  scalar_t* dA,
+  int64_t matrix_stride,
+  int lda,
+  int m,
+  int n,
+  int* dpiv,
+  int* dinfo,
+  int batch_count,
+  const LUTuning& tuning
+) {
+}
+
+template <typename scalar_t>
 void lu_batched_blas3_kernel_impl(
   scalar_t* dA,
   int batch_count,
@@ -66,6 +80,35 @@ void lu_batched_blas3_kernel_impl(
     nbc = tuning.nb_complex;
   } else {
     nbc = tuning.nb_real;
+  }
+
+  // Panel size (columns)
+  int nb;
+  if (n >= tuning.nb_crossover_n) {
+    nb = nbc.nb_large;
+  } else {
+    nb = nbc.nb_small;
+  }
+
+  auto min_mn = std::min(m, n);
+  auto ipiv_stride = min_mn;
+
+  // Right-looking blocked LU: step through columns in blocks of nb.
+  // Each iteration factors one panel of width actual_nb, then updates the
+  // trailing matrix to the right.
+  // The panel itself is factored recursively (splitting its width in half
+  // down to recnb, same algorithm as MAGMA's dgetrf_recpanel_batched).
+  for (int j = 0; j < min_mn; j += nb) {
+    auto actual_nb = std::min(nb, min_mn - j);
+
+    // 1. Panel factorization
+    // Factor columns [j, j + actual_nb) with rows [j, m).
+    // Produces L/U within the panel, and pivot indices ipiv[j:j + actual_nb].
+    // Pivots are global row indices (1-based) - rows may be swapped from
+    // anywhere in [j, m) into the panel.
+    //lu_batched_blas3_kernel_rec<scalar_t>(
+    //  dA, matrix_stride
+    //);
   }
 }
 
