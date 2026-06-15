@@ -53,7 +53,7 @@ inline LUTuning get_tuning() {
 template <typename scalar_t>
 struct LUWorkspace {
   LUWorkspace(const Tensor& input) {
-    int batch_count = batchCount(input);
+    const auto batch_count = batchCount(input);
     // kLong -- assuming 64 bit addresses
     buffer = at::empty({2, batch_count}, input.options().dtype(at::kLong));
     dL_array = static_cast<scalar_t**>(buffer.select(0, 0).data_ptr());
