@@ -54,8 +54,18 @@ void lu_batched_blas3_kernel_impl(
   int64_t matrix_stride,
   int lda,
   int* dpiv,
-  int* dinfo
+  int* dinfo,
+  const LUTuning& tuning
 ) {
+  // Disable TF32 in GEMMs for accuracy
+  NoTF32Guard disable_tf32;
+
+  LUNbConfig nbc;
+  if constexpr (c10::is_complex<scalar_t>::value) {
+    nbc = tuning.nb_complex;
+  } else {
+    nbc = tuning.nb_real;
+  }
 }
 
 } // anonymous namespace
@@ -71,7 +81,8 @@ void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Te
   AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "linalg_lu_batched_blas3_kernel", [&] {
     lu_batched_blas3_kernel_impl<scalar_t>(
       input.data_ptr<scalar_t>(), batch_count, m, n, matrix_stride, lda,
-      pivots.data_ptr<int>(), infos.data_ptr<int>()
+      pivots.data_ptr<int>(), infos.data_ptr<int>(),
+      tuning
     );
   });
 }
