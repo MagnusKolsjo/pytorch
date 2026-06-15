@@ -4,6 +4,7 @@
 #include <ATen/native/LinearAlgebraUtils.h>
 #include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/CUDABlas.h>
+#include <c10/util/complex.h>
 
 
 namespace at::native {
@@ -44,7 +45,35 @@ inline LUTuning get_tuning() {
   };
 }
 
+template<typename scalar_t>
+void lu_batched_blas3_kernel_impl(
+  scalar_t* dA,
+  int batch_count,
+  int m,
+  int n,
+  int64_t matrix_stride,
+  int lda,
+  int* dpiv,
+  int* dinfo
+) {
+}
 
 } // anonymous namespace
+
+void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Tensor& infos) {
+  const auto tuning = get_tuning();
+  int batch_count = batchCount(input);
+  int m = input.size(-2);
+  int n = input.size(-1);
+  int64_t matrix_stride = matrixStride(input);
+  int lda = std::max<int>(input.stride(-1), std::max(1, m));
+
+  AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "linalg_lu_batched_blas3_kernel", [&] {
+    lu_batched_blas3_kernel_impl<scalar_t>(
+      input.data_ptr<scalar_t>(), batch_count, m, n, matrix_stride, lda,
+      pivots.data_ptr<int>(), infos.data_ptr<int>()
+    );
+  });
+}
 
 } // at::native
