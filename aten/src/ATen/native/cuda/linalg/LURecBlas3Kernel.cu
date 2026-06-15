@@ -45,6 +45,25 @@ inline LUTuning get_tuning() {
   };
 }
 
+// Workspace -- pointer arrays needed by cuBLAS batched TRSM.
+// cuBLAS batched TRSM requires device arrays of per-batch pointers (T**).
+// We pre-allocate these once and recompute the pointers before each TRSM
+// call via build_trms_ptrs_device.
+template <typename scalar_t>
+struct LUWorkspace {
+  LUWorkspace(const Tensor& input) {
+    int batch_count = batchCount(input);
+    // kLong -- assuming 64 bit addresses
+    buffer = at::empty({2, batch_count}, input.options().dtype(at::kLong));
+    dL_array = static_cast<scalar_t**>(buffer.select(0, 0).data_ptr());
+    dA_array = static_cast<scalar_t**>(buffer.select(0, 1).data_ptr());
+  }
+
+  Tensor buffer;
+  scalar_t** dL_array;
+  scalar_t** dA_array;
+};
+
 template <typename scalar_t>
 void lu_batched_blas3_kernel_rec(
   scalar_t* dA,
