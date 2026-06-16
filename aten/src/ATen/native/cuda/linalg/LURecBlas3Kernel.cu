@@ -142,6 +142,7 @@ void lu_batched_blas3_kernel_rec(
 
 template <typename scalar_t>
 void lu_batched_blas3_kernel_impl(
+  cublasHandle_t handle,
   scalar_t* dA,
   int batch_count,
   int m,
@@ -232,6 +233,17 @@ void lu_batched_blas3_kernel_impl(
         j, j,
         j, j + actual_nb
       );
+      auto alpha_one = static_cast<scalar_t>(1);
+      auto alpha_neg_one = static_cast<scalar_t>(-1);
+      at::cuda::blas::trsmBatched(
+        handle,
+        CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_N, CUBLAS_DIAG_UNIT,
+        actual_nb, n_right, &alpha_one,
+        ws.dL11_array, lda,
+        ws.dA12_array, lda,
+        batch_count
+      );
     }
   } // for j in range(0, min(m, n), nb)
 }
@@ -247,11 +259,14 @@ void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Te
   // Assuming column-major input with lda >= max(1, m)
   int lda = std::max(cuda_int_cast(input.stride(-1), "input.stride(-1)"), std::max(1, m));
 
+  auto handle = at::cuda::getCurrentCUDABlasHandle();
+
   AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "linalg_lu_batched_blas3_kernel", [&] {
     // Workspace for T** arrays in TRSM
     auto ws = LUWorkspace<scalar_t>(input);
 
     lu_batched_blas3_kernel_impl<scalar_t>(
+      handle,
       input.data_ptr<scalar_t>(), batch_count, m, n, matrix_stride, lda,
       pivots.data_ptr<int>(), infos.data_ptr<int>(),
       ws, tuning
