@@ -69,6 +69,25 @@ struct LUWorkspace {
   scalar_t** dA_array;
 };
 
+// Apply pivots ipiv[col_start:col_start + nb] to columns [col_lo, col_hi).
+// Launches one thread per column with 256-thread blocks.
+// Pivots applied sequentially.
+template <typename scalar_t>
+void batched_apply_pivots(
+  scalar_t* dA,
+  int64_t matrix_stride,
+  int lda,
+  int m,
+  int col_start,
+  int nb,
+  const int* dipiv,
+  int ipiv_stride,
+  int col_lo,
+  int col_hi,
+  int batch_count
+) {
+}
+
 template <typename scalar_t>
 void lu_batched_blas3_kernel_rec(
   scalar_t* dA,
@@ -141,7 +160,37 @@ void lu_batched_blas3_kernel_impl(
       dipiv, ipiv_stride, dinfo,
       batch_count, ws, tuning
     );
-  }
+
+    // 2. Propagate pivots to columns outside the panel
+    // The panel factorization only swapped rows within columns [j, j + actual_nb).
+    // We must apply the same row swaps to the left columns [0, j) and
+    // right columns [j + actual_nb, n) so the full row permutation is consistent.
+    batched_apply_pivots<scalar_t>(
+      dA, matrix_stride, lda, m,
+      j, actual_nb,
+      dipiv, ipiv_stride,
+      0, j, batch_count
+    );
+    batched_apply_pivots<scalar_t>(
+      dA, matrix_stride, lda, m,
+      j, actual_nb,
+      dipiv, ipiv_stride,
+      j + actual_nb, n, batch_count
+    );
+
+    // 3. Trailing matrix update
+    // After pivoting, the block row looks like:
+    //
+    // columns:    [0, j)  [j, j + nb)  [j + nb, n)
+    // row j:      done    L11 \ U11    U12 (need TRSM)
+    // row j + nb: done    L21          A22 (need GEMM)
+    //
+    // U12: solve L11 @ U12 = A[j:j + nb, j + nb:n] (TRSM)
+    // A22: A22 -= L21 @ U12, updating the trailing (m - j - nb) x (n - j - nb) block.
+    auto n_right = n - j - actual_nb;
+    auto m_below = m - j - actual_nb;
+    auto do_trail_update = (n_right )
+  } // for j in range(0, min(m, n), nb)
 }
 
 } // anonymous namespace
