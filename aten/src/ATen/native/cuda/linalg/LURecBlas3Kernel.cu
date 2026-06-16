@@ -58,16 +58,50 @@ struct LUWorkspace {
 
     // kLong -- assuming 64 bit addresses
     buffer = at::empty({2, batch_count}, input.options().dtype(at::kLong));
-    dL_array = buffer.select(0, 0).data_ptr<scalar_t*>();
-    dA_array = buffer.select(0, 1).data_ptr<scalar_t*>();
+    dL11_array = buffer.select(0, 0).data_ptr<scalar_t*>();
+    dA12_array = buffer.select(0, 1).data_ptr<scalar_t*>();
   }
 
   scalar_t* dA_base;
   int batch_count;
   Tensor buffer;
-  scalar_t** dL_array;
-  scalar_t** dA_array;
+  scalar_t** dL11_array;
+  scalar_t** dA12_array;
 };
+
+// Device-side pointer array computation for TRSM.
+template <typename scalar_t>
+__global__ void build_trsm_ptr_kernel(
+  scalar_t* __restrict__ dA, int64_t matrix_stride, int lda, int batch_count,
+  scalar_t** __restrict__ dL11_array, int row_off_L11, int col_off_L11,
+  scalar_t** __restrict__ dA12_array, int row_off_A12, int col_off_A12
+) {
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  if (b >= batch_count) return;
+  auto* base = dA + b * matrix_stride;
+  dL11_array[b] = base + row_off_L11 + static_cast<size_t>(col_off_L11) * lda;
+  dA12_array[b] = base + row_off_A12 + static_cast<size_t>(col_off_A12) * lda;
+}
+
+template <typename scalar_t>
+void build_trsm_ptrs_device(
+  scalar_t* dA,
+  int64_t matrix_stride,
+  LUWorkspace<scalar_t>& ws,
+  int lda,
+  int row_off_L11, int col_off_L11,
+  int row_off_A12, int col_off_A12
+) {
+  int bc = ws.batch_count;
+  int constexpr threads = 64;
+  int blocks = (bc + threads - 1) / threads;
+  build_trsm_ptr_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+    dA, matrix_stride, lda, bc,
+    ws.dL11_array, row_off_L11, col_off_L11,
+    ws.dA12_array, row_off_A12, col_off_A12
+  );
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 // Apply pivots ipiv[col_start:col_start + nb] to columns [col_lo, col_hi).
 // Launches one thread per column with 256-thread blocks.
@@ -189,7 +223,16 @@ void lu_batched_blas3_kernel_impl(
     // A22: A22 -= L21 @ U12, updating the trailing (m - j - nb) x (n - j - nb) block.
     auto n_right = n - j - actual_nb;
     auto m_below = m - j - actual_nb;
-    auto do_trail_update = (n_right )
+    auto do_trailing_update = n_right && m_below && actual_nb;
+    if (n_right && actual_nb) {
+      // L11 at (j, j): actual_nb x actual_nb, unit lower triangular
+      // A12 at (j, j + actual_nb): actual_nb x n_right - overwritten with U12
+      build_trsm_ptrs_device<scalar_t>(
+        dA, matrix_stride, ws, lda,
+        j, j,
+        j, j + actual_nb
+      );
+    }
   } // for j in range(0, min(m, n), nb)
 }
 
