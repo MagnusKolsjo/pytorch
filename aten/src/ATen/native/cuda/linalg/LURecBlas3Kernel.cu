@@ -53,13 +53,13 @@ inline LUTuning get_tuning() {
 template <typename scalar_t>
 struct LUWorkspace {
   LUWorkspace(const Tensor& input) {
-    dA_base = input.data_ptr<scalar_t*>();
+    dA_base = input.data_ptr<scalar_t>();
     batch_count = cuda_int_cast(batchCount(input), "batchCount");
 
     // kLong -- assuming 64 bit addresses
     buffer = at::empty({2, batch_count}, input.options().dtype(at::kLong));
-    dL_array = buffer.select(0, 0).data_ptr<scalar_t**>();
-    dA_array = buffer.select(0, 1).data_ptr<scalar_t**>();
+    dL_array = buffer.select(0, 0).data_ptr<scalar_t*>();
+    dA_array = buffer.select(0, 1).data_ptr<scalar_t*>();
   }
 
   scalar_t* dA_base;
@@ -76,9 +76,13 @@ void lu_batched_blas3_kernel_rec(
   int lda,
   int m,
   int n,
-  int* dpiv,
+  int col_start,
+  int nb,
+  int* dipiv,
+  int ipiv_stride,
   int* dinfo,
   int batch_count,
+  LUWorkspace<scalar_t>& ws,
   const LUTuning& tuning
 ) {
 }
@@ -91,8 +95,9 @@ void lu_batched_blas3_kernel_impl(
   int n,
   int64_t matrix_stride,
   int lda,
-  int* dpiv,
+  int* dipiv,
   int* dinfo,
+  LUWorkspace<scalar_t>& ws,
   const LUTuning& tuning
 ) {
   // Disable TF32 in GEMMs for accuracy
@@ -130,9 +135,12 @@ void lu_batched_blas3_kernel_impl(
     // Produces L/U within the panel, and pivot indices ipiv[j:j + actual_nb].
     // Pivots are global row indices (1-based) - rows may be swapped from
     // anywhere in [j, m) into the panel.
-    //lu_batched_blas3_kernel_rec<scalar_t>(
-    //  dA, matrix_stride
-    //);
+    lu_batched_blas3_kernel_rec<scalar_t>(
+      dA, matrix_stride, lda, m, n,
+      j, actual_nb,
+      dipiv, ipiv_stride, dinfo,
+      batch_count, ws, tuning
+    );
   }
 }
 
@@ -148,10 +156,13 @@ void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Te
   int lda = std::max(cuda_int_cast(input.stride(-1), "input.stride(-1)"), std::max(1, m));
 
   AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "linalg_lu_batched_blas3_kernel", [&] {
+    // Workspace for T** arrays in TRSM
+    auto ws = LUWorkspace<scalar_t>(input);
+
     lu_batched_blas3_kernel_impl<scalar_t>(
       input.data_ptr<scalar_t>(), batch_count, m, n, matrix_stride, lda,
       pivots.data_ptr<int>(), infos.data_ptr<int>(),
-      tuning
+      ws, tuning
     );
   });
 }
