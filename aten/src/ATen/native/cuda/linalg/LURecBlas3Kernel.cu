@@ -233,8 +233,8 @@ void lu_batched_blas3_kernel_impl(
         j, j,
         j, j + actual_nb
       );
-      auto alpha_one = static_cast<scalar_t>(1);
-      auto alpha_neg_one = static_cast<scalar_t>(-1);
+      auto constexpr alpha_one = static_cast<scalar_t>(1);
+      auto constexpr alpha_neg_one = static_cast<scalar_t>(-1);
       at::cuda::blas::trsmBatched(
         handle,
         CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
