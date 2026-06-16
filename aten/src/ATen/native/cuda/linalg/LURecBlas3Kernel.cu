@@ -233,17 +233,38 @@ void lu_batched_blas3_kernel_impl(
         j, j,
         j, j + actual_nb
       );
-      auto constexpr alpha_one = static_cast<scalar_t>(1);
-      auto constexpr alpha_neg_one = static_cast<scalar_t>(-1);
-      at::cuda::blas::trsmBatched(
+
+      auto constexpr one = static_cast<scalar_t>(1);
+      auto constexpr neg_one = static_cast<scalar_t>(-1);
+      at::cuda::blas::trsmBatched<scalar_t>(
         handle,
         CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
         CUBLAS_OP_N, CUBLAS_DIAG_UNIT,
-        actual_nb, n_right, &alpha_one,
+        actual_nb, n_right, &one,
         ws.dL11_array, lda,
         ws.dA12_array, lda,
         batch_count
       );
+
+      // L12 at (j + actual_nb, j): m_below x actual_nb
+      // U12 at (j, j + actual_nb): actula_nb x n_right (from TRSM above)
+      // A22 at (j + actual_nb, j + actual_nb): m_below x n_right
+      if (do_trailing_update) {
+        size_t off_L21 = (j + actual_nb) + static_cast<size_t>(j) * lda;
+        size_t off_U12 = j + static_cast<size_t>(j + actual_nb) * lda;
+        size_t off_A22 = (j + actual_nb) + static_cast<size_t>(j + actual_nb) * lda;
+
+        //at::cuda::blas::bgemm_internal<scalar_t, scalar_t>(
+        //  'n', 'n',
+        //  m_below, n_right, actual_nb,
+        //  &neg_one,
+        //  dA + off_L21, lda, matrix_stride,
+        //  dA + off_U12, lda, matrix_stride,
+        //  &one,
+        //  dA + off_A22, lda, matrix_stride,
+        //  batch_count
+        //);
+      }
     }
   } // for j in range(0, min(m, n), nb)
 }
