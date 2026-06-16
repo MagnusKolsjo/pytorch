@@ -123,7 +123,7 @@ void batched_apply_pivots(
 }
 
 template <typename scalar_t>
-void lu_batched_blas3_kernel_rec(
+void lu_batched_blas3_kernel_flat(
   scalar_t* dA,
   int64_t matrix_stride,
   int lda,
@@ -138,6 +138,59 @@ void lu_batched_blas3_kernel_rec(
   LUWorkspace<scalar_t>& ws,
   const LUTuning& tuning
 ) {
+}
+
+template <typename scalar_t>
+void lu_batched_panel_recursive(
+  scalar_t* dA,
+  int64_t matrix_stride,
+  int lda,
+  int m,
+  int n,
+  int col_start,
+  int nb,
+  int* dipiv,
+  int ipiv_stride,
+  int* dinfo,
+  int batch_count,
+  LUWorkspace<scalar_t>& ws,
+  const LUTuning& tuning
+) {
+  if (nb <= 0) return;
+
+  // Base case: use flat panel factorization
+  if (nb <= tuning.recnb) {
+    lu_batched_blas3_kernel_flat<scalar_t>(
+      dA, matrix_stride, lda, m, n,
+      col_start, nb,
+      dipiv, ipiv_stride, dinfo,
+      batch_count, ws, tuning
+    );
+    return;
+  }
+
+  auto n1 = nb / 2;
+  auto n2 = nb - n1;
+
+  // 1. Factor left half: columns [col_start, col_start + n1)
+  lu_batched_panel_recursive<scalar_t>(
+    dA, matrix_stride, lda, m, n,
+    col_start, n1,
+    dipiv, ipiv_stride, dinfo,
+    batch_count, ws, tuning
+  );
+
+  // 2. Apply left-half pivots to right half columns [col_start + n1, col_start + nb)
+  batched_apply_pivots<scalar_t>(
+    dA, matrix_stride, lda, m,
+    col_start, n1,
+    dipiv, ipiv_stride,
+    col_start + n1, col_start + nb, batch_count
+  );
+
+  // 3. TRSM: L11 \ A12
+  auto m_below = m - col_start - n1;
+  auto do_trailing_update = m_below && n1 && n2;
 }
 
 template <typename scalar_t>
@@ -189,7 +242,7 @@ void lu_batched_blas3_kernel_impl(
     // Produces L/U within the panel, and pivot indices ipiv[j:j + actual_nb].
     // Pivots are global row indices (1-based) - rows may be swapped from
     // anywhere in [j, m) into the panel.
-    lu_batched_blas3_kernel_rec<scalar_t>(
+    lu_batched_panel_recursive<scalar_t>(
       dA, matrix_stride, lda, m, n,
       j, actual_nb,
       dipiv, ipiv_stride, dinfo,
