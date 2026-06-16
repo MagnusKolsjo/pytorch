@@ -254,16 +254,16 @@ void lu_batched_blas3_kernel_impl(
         size_t off_U12 = j + static_cast<size_t>(j + actual_nb) * lda;
         size_t off_A22 = (j + actual_nb) + static_cast<size_t>(j + actual_nb) * lda;
 
-        //at::cuda::blas::bgemm_internal<scalar_t, scalar_t>(
-        //  'n', 'n',
-        //  m_below, n_right, actual_nb,
-        //  &neg_one,
-        //  dA + off_L21, lda, matrix_stride,
-        //  dA + off_U12, lda, matrix_stride,
-        //  &one,
-        //  dA + off_A22, lda, matrix_stride,
-        //  batch_count
-        //);
+        at::cuda::blas::bgemm_internal<scalar_t>(
+          'n', 'n',
+          m_below, n_right, actual_nb,
+          neg_one,
+          dA + off_L21, lda, matrix_stride,
+          dA + off_U12, lda, matrix_stride,
+          one,
+          dA + off_A22, lda, matrix_stride,
+          batch_count
+        );
       }
     }
   } // for j in range(0, min(m, n), nb)
