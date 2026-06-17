@@ -101,6 +101,34 @@ void build_trsm_ptrs_device(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+template <typename scalar_t, int BS>
+__global__ void __launch_bounds__(BS)
+batched_apply_pivots_fused_kernel(
+  scalar_t* __restrict__ dA, int64_t matrix_stride,
+  int lda, int ncols, int col_offset,
+  int col_start, int nb, int ipiv_stride,
+  const int* __restrict__ dipiv
+) {
+  int batch = blockIdx.z;
+  auto* A = dA + batch * matrix_stride;
+  const auto* piv = dipiv + batch * ipiv_stride;
+  int j = blockIdx.x * blockDim.x + threadIdx.x;
+
+  for (int p = 0; p < nb; ++p) {
+    auto row1 = col_start + p;
+    auto row2 = piv[col_start + p] - 1; // 1-based!
+
+    if (row1 != row2 && j < ncols) {
+      size_t idx1 = row1 + static_cast<size_t>(col_offset + j) * lda;
+      size_t idx2 = row2 + static_cast<size_t>(col_offset + j) * lda;
+      auto tmp = A[idx1];
+      A[idx1] = A[idx2];
+      A[idx2] = tmp;
+    }
+    __syncthreads();
+  }
+}
+
 // Apply pivots ipiv[col_start:col_start + nb] to columns [col_lo, col_hi).
 // Launches one thread per column with 256-thread blocks.
 // Pivots applied sequentially.
@@ -118,6 +146,17 @@ void batched_apply_pivots(
   int col_hi,
   int batch_count
 ) {
+  auto ncols = col_hi - col_lo;
+  if (ncols <= 0 || nb <= 0) return;
+
+  auto constexpr threads = 256;
+  auto swap_blocks = (ncols + threads - 1) / threads;
+  auto grid = dim3(swap_blocks, 1, batch_count);
+  batched_apply_pivots_fused_kernel<scalar_t, threads><<<grid, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+    dA, matrix_stride, lda, ncols, col_lo,
+    col_start, nb, ipiv_stride, dipiv
+  );
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 template <typename scalar_t, int BS>
