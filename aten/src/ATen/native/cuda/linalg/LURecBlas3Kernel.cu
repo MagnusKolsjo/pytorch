@@ -98,8 +98,8 @@ struct LUWorkspace {
 
     // kLong -- assuming 64 bit addresses
     buffer = at::empty({2, batch_count}, input.options().dtype(at::kLong));
-    dL11_array = buffer.select(0, 0).data_ptr<scalar_t*>();
-    dA12_array = buffer.select(0, 1).data_ptr<scalar_t*>();
+    dL11_array = static_cast<scalar_t**>(buffer.select(0, 0).data_ptr());
+    dA12_array = static_cast<scalar_t**>(buffer.select(0, 1).data_ptr());
   }
 
   int batch_count;
@@ -627,8 +627,8 @@ void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Te
 
     lu_batched_blas3_kernel_impl<scalar_t>(
       handle,
-      input.data_ptr<scalar_t>(), batch_count, m, n, matrix_stride, lda,
-      pivots.data_ptr<int>(), infos.data_ptr<int>(),
+      static_cast<scalar_t*>(input.data_ptr()), batch_count, m, n, matrix_stride, lda,
+      static_cast<int*>(pivots.data_ptr()), static_cast<int*>(infos.data_ptr()),
       ws, tuning
     );
   });

@@ -61,6 +61,9 @@ struct MagmaInitializer {
 #endif
 
 namespace at::native {
+
+void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Tensor& infos);
+
 #if defined(BUILD_LAZY_CUDA_LINALG)
 // All registrations with PyTorch runtime should be done dynamically
 // so if library is lazy loaded it must not export anything, otherwise
@@ -952,8 +955,6 @@ namespace {
 #endif
 #endif
 
-void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Tensor& infos);
-
 static void lu_factor(const Tensor& input, const Tensor& pivots, const Tensor& infos, bool compute_pivots) {
   auto batch_size = batchCount(input);
   (void) batch_size; // Silence unused warning in some builds
@@ -981,7 +982,7 @@ static void lu_factor(const Tensor& input, const Tensor& pivots, const Tensor& i
 #else
     if (batch_size >= 1) {
       std::cout << "calling my kernel" << std::endl;
-      lu_batched_blas3_kernel(input, pivots, infos);
+      ::at::native::lu_batched_blas3_kernel(input, pivots, infos);
       return;
     }
     const auto solver_backend = get_lu_factor_solver_backend(batch_size, m, n, input.scalar_type());
