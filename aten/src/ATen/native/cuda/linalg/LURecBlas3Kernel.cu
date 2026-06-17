@@ -101,6 +101,50 @@ void build_trsm_ptrs_device(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// Argmax Abs helpers {
+template <typename real_t>
+__device__ __forceinline__ void warp_argmax(real_t& val, int& idx) {
+  #pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    real_t other_val = __shfl_down_sync(0xffffffff, val, offset);
+    int    other_idx = __shfl_down_sync(0xffffffff, idx, offset);
+    if (other_val > val) {
+      val = other_val;
+      idx = other_idx;
+    }
+  }
+}
+
+template <typename real_t, int BS>
+__device__ __forceinline__ int block_argmax(
+  real_t my_max, int my_idx,
+  real_t* sdata, int* sidx, int tid
+) {
+  warp_argmax(my_max, my_idx);
+  int warp_id = tid / 32;
+  int lane = tid % 32;
+
+  if (lane == 0) {
+    sdata[warp_id] = my_max;
+    sidx[warp_id] = my_idx;
+  }
+  __syncthreads();
+
+  constexpr auto NWARPS = BS / 32;
+  if (tid < 32) {
+    auto v = (tid < NWARPS) ? sdata[tid] : real_t(-1);
+    auto i = (tid < NWARPS) ? sidx[tid] : -1;
+    warp_argmax(v, i);
+    if (tid == 0) {
+      sidx[0] = i;
+    }
+  }
+  __syncthreads();
+
+  return sidx[0];
+}
+// }
+
 template <typename scalar_t, int BS>
 __global__ void __launch_bounds__(BS)
 batched_apply_pivots_fused_kernel(
