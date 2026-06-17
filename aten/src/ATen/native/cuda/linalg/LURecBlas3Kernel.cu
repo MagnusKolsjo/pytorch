@@ -142,6 +142,7 @@ void lu_batched_blas3_kernel_flat(
 
 template <typename scalar_t>
 void lu_batched_panel_recursive(
+  cublasHandle_t handle,
   scalar_t* dA,
   int64_t matrix_stride,
   int lda,
@@ -174,6 +175,7 @@ void lu_batched_panel_recursive(
 
   // 1. Factor left half: columns [col_start, col_start + n1)
   lu_batched_panel_recursive<scalar_t>(
+    handle,
     dA, matrix_stride, lda, m, n,
     col_start, n1,
     dipiv, ipiv_stride, dinfo,
@@ -191,6 +193,61 @@ void lu_batched_panel_recursive(
   // 3. TRSM: L11 \ A12
   auto m_below = m - col_start - n1;
   auto do_trailing_update = m_below && n1 && n2;
+
+  if (n1 && n2) {
+    build_trsm_ptrs_device<scalar_t>(
+      dA, matrix_stride, ws, lda,
+      col_start, col_start,
+      col_start, col_start + n1
+    );
+
+    auto constexpr one = static_cast<scalar_t>(1);
+    auto constexpr neg_one = static_cast<scalar_t>(-1);
+    at::cuda::blas::trsmBatched<scalar_t>(
+      handle,
+      CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+      CUBLAS_OP_N, CUBLAS_DIAG_UNIT,
+      n1, n2, &one,
+      ws.dL11_array, lda,
+      ws.dA12_array, lda,
+      batch_count
+    );
+
+    // 4. GEMM: A22 -= L21 @ U12
+    if (do_trailing_update) {
+      size_t off_L21 = (col_start + n1) + static_cast<size_t>(col_start) * lda;
+      size_t off_U12 = col_start + static_cast<size_t>(col_start + n1) * lda;
+      size_t off_A22 = (col_start + n1) + static_cast<size_t>(col_start + n1) * lda;
+
+      at::cuda::blas::bgemm_internal<scalar_t>(
+        'n', 'n',
+        m_below, n2, n1,
+        neg_one,
+        dA + off_L21, lda, matrix_stride,
+        dA + off_U12, lda, matrix_stride,
+        one,
+        dA + off_A22, lda, matrix_stride,
+        batch_count
+      );
+    }
+  }
+
+  // 5. Factor right half: columns [col_start + n1, col_start + nb)
+  lu_batched_panel_recursive<scalar_t>(
+    handle,
+    dA, matrix_stride, lda, m, n,
+    col_start + n1, n2,
+    dipiv, ipiv_stride, dinfo,
+    batch_count, ws, tuning
+  );
+
+  // 6. Apply right-half pivots back to left half columns [col_start, col_start + n1)
+  batched_apply_pivots<scalar_t>(
+    dA, matrix_stride, lda, m,
+    col_start + n1, n2,
+    dipiv, ipiv_stride,
+    col_start, col_start + n1, batch_count
+  );
 }
 
 template <typename scalar_t>
@@ -243,6 +300,7 @@ void lu_batched_blas3_kernel_impl(
     // Pivots are global row indices (1-based) - rows may be swapped from
     // anywhere in [j, m) into the panel.
     lu_batched_panel_recursive<scalar_t>(
+      handle,
       dA, matrix_stride, lda, m, n,
       j, actual_nb,
       dipiv, ipiv_stride, dinfo,
@@ -299,6 +357,7 @@ void lu_batched_blas3_kernel_impl(
         batch_count
       );
 
+      // 4. GEMM: A22 -= L21 @ U12
       // L12 at (j + actual_nb, j): m_below x actual_nb
       // U12 at (j, j + actual_nb): actula_nb x n_right (from TRSM above)
       // A22 at (j + actual_nb, j + actual_nb): m_below x n_right
