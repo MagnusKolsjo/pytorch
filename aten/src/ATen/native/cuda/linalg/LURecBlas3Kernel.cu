@@ -310,8 +310,6 @@ batched_panel_full_kernel(
       sdiag = A[k + static_cast<size_t>(k) * lda];
       if (std::abs(sdiag) == 0 && dinfo[batch] == 0) {
         dinfo[batch] = k + 1; // 1-based!
-      } else {
-        dinfo[batch] = 0; // success
       }
     }
     __syncthreads();
@@ -630,6 +628,8 @@ void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Te
   int lda = std::max(cuda_int_cast(input.stride(-1), "input.stride(-1)"), std::max(1, m));
 
   auto handle = at::cuda::getCurrentCUDABlasHandle();
+  // Zero infos out
+  infos.zero_();
 
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(input.scalar_type(), "linalg_lu_batched_blas3_kernel", [&] {
     // Workspace for T** arrays in TRSM
