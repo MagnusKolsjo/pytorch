@@ -53,7 +53,6 @@ inline LUTuning get_tuning() {
 template <typename scalar_t>
 struct LUWorkspace {
   LUWorkspace(const Tensor& input) {
-    dA_base = input.data_ptr<scalar_t>();
     batch_count = cuda_int_cast(batchCount(input), "batchCount");
 
     // kLong -- assuming 64 bit addresses
@@ -62,7 +61,6 @@ struct LUWorkspace {
     dA12_array = buffer.select(0, 1).data_ptr<scalar_t*>();
   }
 
-  scalar_t* dA_base;
   int batch_count;
   Tensor buffer;
   scalar_t** dL11_array;
@@ -122,6 +120,18 @@ void batched_apply_pivots(
 ) {
 }
 
+template <typename scalar_t, int BS>
+__global__ void __launch_bounds__(BS)
+batched_panel_full_kernel(
+  scalar_t* __restrict__ dA, int64_t matrix_stride,
+  int lda, int m,
+  int col_start, int panel_end,
+  int ipiv_stride,
+  int* __restrict__ dipiv,
+  int* __restrict__ dinfo
+) {
+}
+
 template <typename scalar_t>
 void lu_batched_blas3_kernel_flat(
   scalar_t* dA,
@@ -138,6 +148,25 @@ void lu_batched_blas3_kernel_flat(
   LUWorkspace<scalar_t>& ws,
   const LUTuning& tuning
 ) {
+  auto panel_end = std::min(col_start + nb, n);
+  if (panel_end <= col_start) return;
+
+  auto grid = dim3(1, 1, batch_count);
+  if ((m - col_start) > tuning.panel_threshold) {
+    batched_panel_full_kernel<scalar_t, 1024><<<grid, 1024, 0, at::cuda::getCurrentCUDAStream()>>>(
+      dA, matrix_stride, lda, m,
+      col_start, panel_end,
+      ipiv_stride, dipiv, dinfo
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  } else {
+    batched_panel_full_kernel<scalar_t, 256><<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      dA, matrix_stride, lda, m,
+      col_start, panel_end,
+      ipiv_stride, dipiv, dinfo
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
 }
 
 template <typename scalar_t>
