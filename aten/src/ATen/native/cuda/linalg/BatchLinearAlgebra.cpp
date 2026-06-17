@@ -952,6 +952,8 @@ namespace {
 #endif
 #endif
 
+void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Tensor& infos);
+
 static void lu_factor(const Tensor& input, const Tensor& pivots, const Tensor& infos, bool compute_pivots) {
   auto batch_size = batchCount(input);
   (void) batch_size; // Silence unused warning in some builds
@@ -977,6 +979,11 @@ static void lu_factor(const Tensor& input, const Tensor& pivots, const Tensor& i
       lu_factor_batched_cublas(input, pivots, infos, compute_pivots);
     }
 #else
+    if (batch_size >= 1) {
+      std::cout << "calling my kernel" << std::endl;
+      lu_batched_blas3_kernel(input, pivots, infos);
+      return;
+    }
     const auto solver_backend = get_lu_factor_solver_backend(batch_size, m, n, input.scalar_type());
     if (solver_backend == SolverBackend::CUSOLVER) {
       lu_factor_looped_cusolver(input, pivots, infos, compute_pivots);
