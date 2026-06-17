@@ -302,6 +302,8 @@ batched_panel_full_kernel(
       sdiag = A[k + static_cast<size_t>(k) * lda];
       if (::abs(sdiag) == 0 && dinfo[batch] == 0) {
         dinfo[batch] = k + 1; // 1-based!
+      } else {
+        dinfo[batch] = 0; // success
       }
     }
     __syncthreads();
