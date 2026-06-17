@@ -12,6 +12,47 @@ namespace at::native {
 
 namespace {
 
+inline cublasStatus_t gemm_strided(
+    cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k, const float* alpha,
+    const float* A, int lda, long long strideA,
+    const float* B, int ldb, long long strideB,
+    const float* beta, float* C, int ldc, long long strideC, int batchCount)
+{
+    return cublasSgemmStridedBatched(handle, transa, transb, m, n, k, alpha, A, lda, strideA, B, ldb, strideB, beta, C, ldc, strideC, batchCount);
+}
+
+inline cublasStatus_t gemm_strided(
+    cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k, const double* alpha,
+    const double* A, int lda, long long strideA,
+    const double* B, int ldb, long long strideB,
+    const double* beta, double* C, int ldc, long long strideC, int batchCount)
+{
+    return cublasDgemmStridedBatched(handle, transa, transb, m, n, k, alpha, A, lda, strideA, B, ldb, strideB, beta, C, ldc, strideC, batchCount);
+}
+
+inline cublasStatus_t gemm_strided(
+    cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k, const c10::complex<float>* alpha,
+    const c10::complex<float>* A, int lda, long long strideA,
+    const c10::complex<float>* B, int ldb, long long strideB,
+    const c10::complex<float>* beta, c10::complex<float>* C, int ldc, long long strideC, int batchCount)
+{
+  //cuComplex
+    //return cublasCgemmStridedBatched(handle, transa, transb, m, n, k, alpha, A, lda, strideA, B, ldb, strideB, beta, C, ldc, strideC, batchCount);
+}
+
+inline cublasStatus_t gemm_strided(
+    cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k, const c10::complex<double>* alpha,
+    const c10::complex<double>* A, int lda, long long strideA,
+    const c10::complex<double>* B, int ldb, long long strideB,
+    const c10::complex<double>* beta, c10::complex<double>* C, int ldc, long long strideC, int batchCount)
+{
+  // cuDoubleComplex
+    //return cublasZgemmStridedBatched(handle, transa, transb, m, n, k, alpha, A, lda, strideA, B, ldb, strideB, beta, C, ldc, strideC, batchCount);
+}
 
 struct LUNbConfig {
   int nb_small; // outer loop blocking factor when n < nb_crossover_n
@@ -403,13 +444,14 @@ void lu_batched_panel_recursive(
       size_t off_U12 = col_start + static_cast<size_t>(col_start + n1) * lda;
       size_t off_A22 = (col_start + n1) + static_cast<size_t>(col_start + n1) * lda;
 
-      at::cuda::blas::bgemm_internal<scalar_t>(
-        'n', 'n',
+      gemm_strided(
+        handle,
+        CUBLAS_OP_N, CUBLAS_OP_N,
         m_below, n2, n1,
-        neg_one,
+        &neg_one,
         dA + off_L21, lda, matrix_stride,
         dA + off_U12, lda, matrix_stride,
-        one,
+        &one,
         dA + off_A22, lda, matrix_stride,
         batch_count
       );
@@ -550,13 +592,14 @@ void lu_batched_blas3_kernel_impl(
         size_t off_U12 = j + static_cast<size_t>(j + actual_nb) * lda;
         size_t off_A22 = (j + actual_nb) + static_cast<size_t>(j + actual_nb) * lda;
 
-        at::cuda::blas::bgemm_internal<scalar_t>(
-          'n', 'n',
+        gemm_strided(
+          handle,
+          CUBLAS_OP_N, CUBLAS_OP_N,
           m_below, n_right, actual_nb,
-          neg_one,
+          &neg_one,
           dA + off_L21, lda, matrix_stride,
           dA + off_U12, lda, matrix_stride,
-          one,
+          &one,
           dA + off_A22, lda, matrix_stride,
           batch_count
         );
