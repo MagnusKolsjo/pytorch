@@ -980,7 +980,7 @@ static void lu_factor(const Tensor& input, const Tensor& pivots, const Tensor& i
       lu_factor_batched_cublas(input, pivots, infos, compute_pivots);
     }
 #else
-    if (batch_size >= 1) {
+    if (batch_size >= 1 && compute_pivots) {
       std::cout << "calling my kernel" << std::endl;
       ::at::native::lu_batched_blas3_kernel(input, pivots, infos);
       return;
