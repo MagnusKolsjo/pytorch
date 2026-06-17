@@ -213,6 +213,78 @@ batched_panel_full_kernel(
   int* __restrict__ dipiv,
   int* __restrict__ dinfo
 ) {
+  using real_t = c10::scalar_value_type<scalar_t>::type;
+
+  int constexpr NWARPS = BS / 32;
+  __shared__ real_t sdata[NWARPS];
+  __shared__ int sidx[NWARPS];
+  __shared__ scalar_t sdiag;
+
+  int batch = blockIdx.z;
+  auto* A = dA + batch * matrix_stride;
+  int tid = threadIdx.x;
+  int ncols_panel = panel_end - col_start;
+
+  for (int k = col_start; k < panel_end; ++k) {
+    int rows_below = m - k - 1;
+    int update_cols = panel_end - k - 1;
+
+    // 1. Pivot find (warp-shuffle reduction)
+    auto my_max = static_cast<real_t>(-1);
+    auto my_idx = -1;
+    for (int i = k + tid; i < m; i += BS) {
+      auto v = ::abs(A[i + static_cast<size_t>(k) * lda]);
+      if (v > my_max) {
+        my_max = v;
+        my_idx = i;
+      }
+    }
+    int pivot_row = block_argmax<real_t, BS>(my_max, my_idx, sdata, sidx, tid);
+    if (tid == 0) {
+      dipiv[batch * ipiv_stride + k] = pivot_row + 1; // 1-based!
+    }
+
+    // 2. Row swaps
+    if (pivot_row != k) {
+      for (int j = tid; j < ncols_panel; j += BS) {
+        size_t idx1 = k + static_cast<size_t>(col_start + j) * lda;
+        size_t idx2 = pivot_row + static_cast<size_t>(col_start + j) * lda;
+        auto tmp = A[idx1];
+        A[idx1] = A[idx2];
+        A[idx2] = tmp;
+      }
+    }
+    __syncthreads();
+
+    // 3. Scale (divide by diagonal - skip if zero for singular matrices)
+    if (tid == 0) {
+      sdiag = A[k + static_cast<size_t>(k) * lda];
+      if (::abs(sdiag) == 0 && dinfo[batch] == 0) {
+        dinfo[batch] = k + 1; // 1-based!
+      }
+    }
+    __syncthreads();
+    if (::abs(sdiag) != 0) {
+      for (int i = k + 1 + tid; i < m; i += BS) {
+        A[i + static_cast<size_t>(k) * lda] /= sdiag;
+      }
+    }
+    __syncthreads();
+
+    // 4. Rank-1 update (linearized)
+    if (rows_below > 0 && update_cols > 0) {
+      int numel = rows_below * update_cols;
+      for (int idx = tid; idx < numel; idx += BS) {
+        auto ri = idx % rows_below;
+        auto ci = idx / rows_below;
+        auto i = k + 1 + ri;
+        auto j = k + 1 + ci;
+        A[i + static_cast<size_t>(j) * lda] -=
+          A[i + static_cast<size_t>(k) * lda] * A[k + static_cast<size_t>(j) * lda];
+      }
+    }
+    __syncthreads();
+  } // for cols in the panel
 }
 
 template <typename scalar_t>
