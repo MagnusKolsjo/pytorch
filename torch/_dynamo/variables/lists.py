@@ -1286,7 +1286,23 @@ class ListVariable(CommonListMethodsVariable):
                 # before the step==1 branch, so this message applies to all
                 # slice forms.
                 if not vt_is_iterable(value):
-                    raise_type_error(tx, "must assign iterable to extended slice")
+                    # CPython gh-120384 introduced a regression, present only
+                    # in 3.12.0-3.12.4, where simple slices (step is None or
+                    # step == 1) raised "can only assign an iterable" instead
+                    # of the extended-slice message; true extended slices
+                    # were unaffected. This was fixed in 3.12.5, and 3.10/3.11
+                    # never had the regression, so they also always use the
+                    # extended-slice message.
+                    if (3, 12, 0) <= sys.version_info < (3, 12, 5):
+                        step = key_as_const.step
+                        if step is None or step == 1:
+                            raise_type_error(tx, "can only assign an iterable")
+                        else:
+                            raise_type_error(
+                                tx, "must assign iterable to extended slice"
+                            )
+                    else:
+                        raise_type_error(tx, "must assign iterable to extended slice")
 
                 value_unpack = unpack_iterable(tx, value)
                 try:

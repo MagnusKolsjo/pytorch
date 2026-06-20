@@ -3,6 +3,8 @@
 # TODO: move set tests from test_functions.py/test_misc.py to this file
 
 
+import sys
+
 import torch
 import torch._dynamo.test_case
 from torch.testing._internal.common_utils import make_dynamo_test
@@ -482,6 +484,47 @@ class ListTests(TupleTests):
         self.assertRaises(TypeError, p.__delitem__)
         self.assertRaises(TypeError, p.__delitem__, 1.1)
         self.assertRaises(TypeError, p.__delitem__, 1, 2)
+
+    @make_dynamo_test
+    def test___setitem___slice_non_iterable(self):
+        # ref: https://github.com/python/cpython/pull/120442 (gh-120384),
+        # which fixed an array-out-of-bounds crash by moving the
+        # PySequence_Fast check ahead of the step==1 branch. This landed in
+        # 3.12.5 and was never present in 3.10/3.11 or 3.13+ (verified
+        # empirically across cpython 3.10.20, 3.11.15, 3.12.0-3.12.13,
+        # 3.13.0, and 3.14.5): only 3.12.0-3.12.4 raise "can only assign an
+        # iterable" for simple (step is None or 1) slices; every other
+        # version raises the extended-slice message for all slice forms.
+        p = self.thetype("abcdef")
+        if (3, 12, 0) <= sys.version_info < (3, 12, 5):
+            self.assertRaisesRegex(
+                TypeError,
+                "can only assign an iterable",
+                p.__setitem__,
+                slice(1, 3),
+                1,
+            )
+        else:
+            self.assertRaisesRegex(
+                TypeError,
+                "must assign iterable to extended slice",
+                p.__setitem__,
+                slice(1, 3),
+                1,
+            )
+
+        # Extended slices (step != 1) always use the extended-slice message.
+        self.assertRaisesRegex(
+            TypeError,
+            "must assign iterable to extended slice",
+            p.__setitem__,
+            slice(1, 5, 2),
+            1,
+        )
+
+        # Valid iterable assignments are unaffected.
+        p[1:3] = ["x", "y"]
+        self.assertEqual(p, ["a", "x", "y", "d", "e", "f"])
 
 
 if __name__ == "__main__":
