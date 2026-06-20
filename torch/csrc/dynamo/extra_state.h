@@ -6,6 +6,7 @@
 
 #ifdef __cplusplus
 
+#include <torch/csrc/dynamo/guards.h>
 #include <torch/csrc/dynamo/utils.h>
 #include <torch/csrc/utils/pybind.h>
 #include <list>
@@ -70,6 +71,7 @@ typedef struct VISIBILITY_HIDDEN ExtraState {
   size_t total_cache_entry_count{0};
   // Frame state to detect dynamic shape dims
   py::dict frame_state;
+  std::unique_ptr<torch::dynamo::GuardLastSuccessReceipt> last_success_receipt;
   // Actions to apply to all frames with this code object (non-isolated)
   FrameExecStrategy strategy{DEFAULT, DEFAULT};
   // Per-region strategies for isolated compiles. When an isolated region
@@ -79,6 +81,9 @@ typedef struct VISIBILITY_HIDDEN ExtraState {
   ExtraState(PyCodeObject* orig_code_arg);
   std::list<CacheEntry>& cache_entry_list(int64_t isolate_recompiles_id);
   bool has_any_cache_entries() const;
+  py::dict get_guard_lookup_stats() const;
+  void reset_guard_lookup_stats();
+  CacheEntry* get_first_entry();
   void move_to_front(CacheEntry* cache_entry, std::list<CacheEntry>& entries);
   void move_to_back(CacheEntry* cache_entry);
   void invalidate(CacheEntry* cache_entry, py::object deleted_guard_manager);
