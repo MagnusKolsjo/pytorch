@@ -2128,10 +2128,13 @@ class FxGraphCache(GuardedCache[CompiledFxGraph]):
         symints = FxGraphCache._filter_backed_symints(example_inputs)
         hints = [guarding_hint_or_throw(s) for s in symints]
 
+        uses_default_guard_evaluator = evaluate_guards is None
+
         # If this config is turned on, everything is a guard hit and we check nothing
         if config.unsafe_skip_cache_dynamic_shape_guards:
             # This also makes it so we don't add anything to the dynamic
             # shape environment
+            uses_default_guard_evaluator = False
             evaluate_guards = lambda x, y: True  # noqa: E731
 
         if evaluate_guards is None:
@@ -2164,7 +2167,30 @@ class FxGraphCache(GuardedCache[CompiledFxGraph]):
 
         # Now re-evaluate with the symints to add any guards to the current env.
         if graph.guards_expr:
-            check = bool(evaluate_guards(graph.guards_expr, symints))
+            # Older cache entries were serialized before guard source locations
+            # were stored, so keep accepting entries with only guards_expr.
+            guards_expr_with_source = getattr(graph, "guards_expr_with_source", None)
+            guards_expr_with_source_arg_count = getattr(
+                graph, "guards_expr_with_source_arg_count", None
+            )
+            # Custom guard evaluators, such as AOTAutograd's exact-match
+            # checker, own the cache-validity contract. Only replay per-guard
+            # source locations for ordinary FX graph cache guard evaluation.
+            # Also require the saved placeholder count to match the current
+            # SymInt list, because AOTAutograd can load an FX graph using an
+            # argument list that differs from the one Inductor used to save
+            # these per-guard expressions.
+            can_replay_guards_with_source = (
+                uses_default_guard_evaluator
+                and guards_expr_with_source is not None
+                and guards_expr_with_source_arg_count == len(symints)
+            )
+            if can_replay_guards_with_source:
+                check = shape_env.evaluate_guards_expression_with_source_info(
+                    guards_expr_with_source, symints
+                )
+            else:
+                check = bool(evaluate_guards(graph.guards_expr, symints))
             assert check is True  # noqa: S101
             log.debug(
                 "fx graph cache key %s post-load guards: %s", key, shape_env.guards
@@ -2219,8 +2245,14 @@ class FxGraphCache(GuardedCache[CompiledFxGraph]):
             raise AssertionError("ShapeEnv is not set for cache serialization")
         symints = FxGraphCache._filter_backed_symints(example_inputs)
         guards = shape_env.get_pruned_guards(symints)
-        compiled_graph.guards_expr = shape_env.produce_guards_expression(
+        (
+            compiled_graph.guards_expr,
+            compiled_graph.guards_expr_with_source,
+        ) = shape_env.produce_guards_expression_with_source_info(
             placeholders=symints, guards=guards
+        )
+        compiled_graph.guards_expr_with_source_arg_count = (
+            len(symints) if compiled_graph.guards_expr_with_source is not None else None
         )
         try:
             backend = torch.utils._triton.triton_backend()
