@@ -3053,13 +3053,24 @@ Generate the torch object - Dynamo tracing rule (the wrapping variable) map.
 """
 
 
-@functools.cache
+def _is_dtensor_loaded() -> bool:
+    dtensor_api = sys.modules.get("torch.distributed.tensor._api")
+    return dtensor_api is not None and hasattr(dtensor_api, "DTensor")
+
+
 def get_torch_obj_rule_map() -> dict[Any, type["VariableTracker"]]:
+    return _get_torch_obj_rule_map(_is_dtensor_loaded())
+
+
+@functools.cache
+def _get_torch_obj_rule_map(
+    dtensor_loaded: bool,
+) -> dict[Any, type["VariableTracker"]]:
     d: dict[Any, type[VariableTracker]] = {}
     for m in torch_name_rule_map:
         for k, v in m.items():  # type: ignore[attr-defined]
             if ".py#" not in k:
-                obj = load_object(k)
+                obj = load_object(k, allow_dtensor_import=dtensor_loaded)
             else:
                 torch_dir = _module_dir(torch)
                 if torch_dir is None:
@@ -3087,8 +3098,10 @@ Load string represented torch objects.
 """
 
 
-def load_object(name: str) -> Any:
+def load_object(name: str, *, allow_dtensor_import: bool = True) -> Any:
     try:
+        if name.startswith("torch.distributed.tensor.") and not allow_dtensor_import:
+            return None
         x = name.split("#")
         if len(x) == 2:
             obj = _load_obj_from_str(x[0])
@@ -3312,9 +3325,11 @@ _lazy_module_init: dict[str, list[Callable[[], None]]] = defaultdict(list)
 
 def add_module_init_func(name: str, init_func: Callable[[], None]) -> None:
     """Register a module without eagerly importing it"""
-    # If the module is already imported, eagerly run init
     if "." in name:
         raise AssertionError(f"Expected a root module name, but got {name}")
+    if name in sys.modules:
+        init_func()
+        return
     if name in _lazy_module_init:
         raise AssertionError(f"Module init function already registered for {name}")
     _lazy_module_init[name].append(init_func)
@@ -4257,7 +4272,7 @@ def _lookup_inner(
 
 
 def clear_lru_cache() -> None:
-    torch._dynamo.trace_rules.get_torch_obj_rule_map.cache_clear()
+    torch._dynamo.trace_rules._get_torch_obj_rule_map.cache_clear()
     torch._dynamo.trace_rules.get_tensor_method.cache_clear()
     torch._dynamo.trace_rules.get_legacy_mod_inlinelist.cache_clear()
     torch._dynamo.trace_rules.get_mod_inlinelist.cache_clear()
