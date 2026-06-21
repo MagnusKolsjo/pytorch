@@ -8662,6 +8662,82 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         self.assertEqual(out, opt_out)
         self.assertEqual(guard_failure, None)
 
+    def test_no_guard_for_unused_input(self):
+        def fn(x, y):
+            return x + 1
+
+        cnt = torch._dynamo.testing.CompileCounter()
+        opt_fn = torch.compile(fn, backend=cnt, dynamic=False)
+        opt_fn(torch.randn(3), torch.randn(3))
+        opt_fn(torch.randn(3), torch.randn(5))
+        opt_fn(torch.randn(3), 42)
+        self.assertEqual(cnt.frame_count, 1)
+
+    def test_no_guard_for_unused_scalar_input(self):
+        def fn(x, n):
+            return x + 1
+
+        cnt = torch._dynamo.testing.CompileCounter()
+        opt_fn = torch.compile(fn, backend=cnt, dynamic=False)
+        opt_fn(torch.randn(3), 5)
+        opt_fn(torch.randn(3), 99)
+        opt_fn(torch.randn(3), "hello")
+        self.assertEqual(cnt.frame_count, 1)
+
+    def test_no_guard_for_unused_input_when_locals_called(self):
+        # locals() can observe the full namespace without LOAD_FAST, so we
+        # must keep all inputs and accept the resulting recompiles.
+        def fn(x, y):
+            return locals()["x"] + 1
+
+        cnt = torch._dynamo.testing.CompileCounter()
+        opt_fn = torch.compile(fn, backend=cnt, dynamic=False)
+        opt_fn(torch.randn(3), torch.randn(3))
+        opt_fn(torch.randn(3), torch.randn(5))
+        self.assertEqual(cnt.frame_count, 2)
+
+    def test_locals_dict_access_of_unused_param_works(self):
+        def fn(x, y):
+            return locals()["y"] + x
+
+        opt_fn = torch.compile(fn, backend="eager")
+        x, y = torch.randn(3), torch.randn(3)
+        self.assertEqual(opt_fn(x, y), fn(x, y))
+
+    def test_no_guard_for_unused_input_varargs(self):
+        def fn(x, *args, **kwargs):
+            return x + 1
+
+        opt_fn = torch.compile(fn, backend="eager")
+        x = torch.randn(3)
+        result = opt_fn(x, torch.randn(2), extra=torch.randn(1))
+        self.assertEqual(result, fn(x))
+
+    def test_no_guard_for_unused_input_still_recompiles_on_used(self):
+        def fn(x, y):
+            return x + 1
+
+        cnt = torch._dynamo.testing.CompileCounter()
+        opt_fn = torch.compile(fn, backend=cnt, dynamic=False)
+        opt_fn(torch.randn(3), torch.randn(3))
+        opt_fn(torch.randn(3), torch.randn(5))
+        self.assertEqual(cnt.frame_count, 1)
+        opt_fn(torch.randn(4), torch.randn(3))
+        self.assertEqual(cnt.frame_count, 2)
+
+    def test_no_guard_for_unused_input_with_graph_break(self):
+        def fn(x, y):
+            z = x + 1
+            torch._dynamo.graph_break()
+            return z + 2
+
+        cnt = torch._dynamo.testing.CompileCounter()
+        opt_fn = torch.compile(fn, backend=cnt, dynamic=False)
+        opt_fn(torch.randn(3), torch.randn(3))
+        after_first = cnt.frame_count
+        opt_fn(torch.randn(3), torch.randn(5))
+        self.assertEqual(cnt.frame_count, after_first)
+
     def test_guard_sym_node_fstring_when_used(self):
         def fn(x):
             # assign fstring to a variable causes the fstring to be used,
