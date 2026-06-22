@@ -19,7 +19,7 @@ TRITON_MAX_BLOCK = {
     "R0_": 4096 * 16,  # * 16 is multi-kernel only
     "R1_": 2048 * 16,  # * 16 is multi-kernel only
 }
-TRITON_MAX_RSPLIT = 64
+TRITON_MAX_RSPLIT = 128
 TRITON_MAX_TENSOR_NUMEL = 1 << 20
 TRITON_DOT_MIN_BLOCK = 16
 TRITON_DEFAULT_BLOCK_SIZES = {
