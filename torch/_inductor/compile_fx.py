@@ -402,14 +402,23 @@ def _resolve_name_collision(mod: GraphModule, gm: GraphModule) -> None:
 
 
 def _unlift_graph(
-    mod: GraphModule, gm: GraphModule, graph_signature: GraphSignature
+    mod: GraphModule,
+    gm: GraphModule,
+    graph_signature: GraphSignature,
+    named_parameters: list[tuple[str, torch.nn.Parameter]] | None = None,
+    named_buffers: list[tuple[str, torch.Tensor]] | None = None,
 ) -> GraphModule:
     from torch.export.unflatten import _assign_attr, _AttrKind
 
     _resolve_name_collision(mod, gm)
 
+    if named_parameters is None:
+        named_parameters = list(mod.named_parameters(remove_duplicate=False))
+    if named_buffers is None:
+        named_buffers = list(mod.named_buffers(remove_duplicate=False))
+
     state_dict: dict[str, torch.nn.parameter.Parameter | torch.Tensor] = {}
-    for name, param in mod.named_parameters(remove_duplicate=False):
+    for name, param in named_parameters:
         state_dict[name] = param
         _assign_attr(
             param,
@@ -417,7 +426,7 @@ def _unlift_graph(
             name,
             attr_kind=_AttrKind.PARAMETER,
         )
-    for name, buffer in mod.named_buffers(remove_duplicate=False):
+    for name, buffer in named_buffers:
         state_dict[name] = buffer
         _assign_attr(
             buffer,
@@ -3103,6 +3112,10 @@ def _compile_fx_main(
             # aot_export_module path doesn't use that cache so run them here.
             if isinstance(model_, GraphModule):
                 model_ = run_pre_grad_passes(model_, example_inputs_)
+            # aot_export_module functionalizes module attrs while tracing; keep
+            # the original Parameter/Buffer objects for AOTI unlift.
+            named_parameters = list(model_.named_parameters(remove_duplicate=False))
+            named_buffers = list(model_.named_buffers(remove_duplicate=False))
 
             with functorch_config.patch(
                 unlift_effect_tokens=True,
@@ -3149,7 +3162,9 @@ def _compile_fx_main(
                         elif isinstance(target, FakeScriptObject):
                             node.meta["val"] = target
 
-            unlifted_gm = _unlift_graph(model_, gm, graph_signature)
+            unlifted_gm = _unlift_graph(
+                model_, gm, graph_signature, named_parameters, named_buffers
+            )
             if "dynamo_flat_name_to_original_fqn" in model_.meta:
                 unlifted_gm.meta["dynamo_flat_name_to_original_fqn"] = model_.meta[
                     "dynamo_flat_name_to_original_fqn"
@@ -3306,8 +3321,12 @@ def _aoti_flatten_inputs(
     Flatten the inputs to the graph module and return the flat inputs and options.
     Add "aot_inductor.serialized_in_spec" and "aot_inductor.serialized_out_spec" to the options.
     """
+    from torch._dynamo.functional_export import _DynamoBytecodeCodeGen
+
     # pyrefly: ignore [missing-module-attribute]
     from .compile_fx import graph_returns_tuple
+
+    kwargs = kwargs or {}
 
     if not graph_returns_tuple(gm):
         raise AssertionError(
@@ -3329,6 +3348,36 @@ def _aoti_flatten_inputs(
         if codegen.pytree_info.out_spec is not None:
             out_spec = codegen.pytree_info.out_spec
 
+    elif isinstance(gm.graph._codegen, _DynamoBytecodeCodeGen):
+        codegen = gm.graph._codegen
+        _, in_spec = pytree.tree_flatten((args, kwargs))
+
+        # Bytecode export graphs recover their public output pytree through
+        # this callback instead of _PyTreeCodeGen metadata.
+        output_node = gm.graph.output_node()
+        flat_outputs = output_node.args[0]
+        if not isinstance(flat_outputs, (tuple, list)):
+            flat_outputs = (flat_outputs,)
+        dummy_outputs = tuple(object() for _ in flat_outputs)
+
+        if len(codegen.orig_arg_names) != len(args) + len(kwargs):
+            raise AssertionError(
+                f"Total number of arg names is expected to be {len(codegen.orig_arg_names)} "
+                f"but got {len(args)} positional args, {len(kwargs)} kwargs."
+            )
+        positional_inputs = (
+            *args,
+            *(kwargs[name] for name in codegen.orig_arg_names[len(args) :]),
+        )
+        unflatten_output = getattr(gm, "_dynamo_bytecode_unflatten", None)
+        if not callable(unflatten_output):
+            raise AssertionError(
+                "Expected _dynamo_bytecode_unflatten on bytecode export graph"
+            )
+        _, out_spec = pytree.tree_flatten(
+            unflatten_output(dummy_outputs, positional_inputs)
+        )
+
     else:
         if hasattr(gm, "_in_spec"):
             in_spec = gm._in_spec
@@ -3340,9 +3389,7 @@ def _aoti_flatten_inputs(
         pytree.treespec_dumps(out_spec) if out_spec is not None else ""
     )
 
-    flat_args_with_path, received_spec = pytree.tree_flatten_with_path(
-        (args, kwargs or {})
-    )
+    flat_args_with_path, received_spec = pytree.tree_flatten_with_path((args, kwargs))
 
     if any(isinstance(x[1], torch.ScriptObject) for x in flat_args_with_path):
         from torch._dynamo.exc import UserError, UserErrorType
