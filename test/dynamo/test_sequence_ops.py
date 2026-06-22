@@ -202,7 +202,6 @@ class TestSqConcat(torch._dynamo.test_case.TestCase):
 
     # --- User-defined deque subclass concatenation ---
 
-    @unittest.expectedFailure
     @make_dynamo_test
     def test_user_defined_deque_concat(self):
         a = UserDefinedDeque([1, 2])

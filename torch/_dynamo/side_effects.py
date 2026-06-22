@@ -575,6 +575,7 @@ class SideEffects:
             str.__getattribute__,
             list.__getattribute__,
             tuple.__getattribute__,
+            collections.deque.__getattribute__,
             BaseException.__getattribute__,
         )
 
@@ -710,6 +711,8 @@ class SideEffects:
                 variable_cls = variables.UserDefinedTupleVariable
         elif issubclass(user_cls, list):
             variable_cls = variables.UserDefinedListVariable
+        elif issubclass(user_cls, collections.deque):
+            variable_cls = variables.UserDefinedDequeVariable
         elif issubclass(user_cls, MutableMapping):
             variable_cls = variables.MutableMappingVariable
         elif is_frozen_dataclass(user_cls):
