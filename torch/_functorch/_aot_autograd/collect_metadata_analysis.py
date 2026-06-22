@@ -214,18 +214,22 @@ def run_functionalized_fw_and_collect_metadata(
         fake_mode = detect_fake_mode()
         if fake_mode and (shape_env := fake_mode.shape_env):
             suppress_pending = shape_env.ignore_fresh_unbacked_symbols()
-        with disable_above, mode, suppress_pending, disable_autocast_cache():
+
+        cpp_fake_mode = CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
+        cpp_fake_ctx: contextlib.AbstractContextManager[Any] = (
+            cpp_fake_mode if cpp_fake_mode is not None else contextlib.nullcontext()
+        )
+        with (
+            disable_above,
+            mode,
+            suppress_pending,
+            disable_autocast_cache(),
+            cpp_fake_ctx,
+        ):
             # precondition: The passed in function already handles unflattening inputs + flattening outputs
             flat_f_args = pytree.tree_map(_to_fun, flat_args)
             flat_f_args_descs = flat_args_descs
-            cpp_fake_mode = CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
-            if cpp_fake_mode is not None:
-                cpp_fake_mode.activate()
-            try:
-                flat_f_outs = f(*flat_f_args)
-            finally:
-                if cpp_fake_mode is not None:
-                    cpp_fake_mode.deactivate()
+            flat_f_outs = f(*flat_f_args)
 
             # Assert that f does NOT have an AOTOutputs in it, easy mistake to
             # make!  You need to drop the second output before calling this
