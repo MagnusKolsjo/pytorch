@@ -274,31 +274,27 @@ reader.tensor(buf0, (3, 4, 5, 6), (120, 1, 24, 4), is_leaf=True)  # x""",
         with patch.object(sys, "path", [test_inductor_dir, *sys.path]):
             custom_inductor_config = importlib.import_module("custom_inductor_config")
 
-        old_enable_optimisation = custom_inductor_config.enable_optimisation
-        try:
-            # This re-registers the CPU backend with its original scheduling and
-            # wrapper codegen, but adds a third-party backend config module.
-            with patch_inductor_backend(
-                "cpu", custom_backend_config=custom_inductor_config
-            ):
-                custom_inductor_config.enable_optimisation = True
-                args = [torch.randn(4)]
+        # This re-registers the CPU backend with its original scheduling and
+        # wrapper codegen, but adds a third-party backend config module.
+        with (
+            patch_inductor_backend("cpu", custom_backend_config=custom_inductor_config),
+            custom_inductor_config.patch(enable_optimisation=True),
+        ):
+            args = [torch.randn(4)]
 
-                def f(x):
-                    return (x + 1,)
+            def f(x):
+                return (x + 1,)
 
-                gm = make_fx(f)(*args)
-                buf = io.StringIO()
-                save_graph_repro(buf, gm, args, "inductor")
-                repro = buf.getvalue()
+            gm = make_fx(f)(*args)
+            buf = io.StringIO()
+            save_graph_repro(buf, gm, args, "inductor")
+            repro = buf.getvalue()
 
-                self.assertIn(f"import {custom_inductor_config.__name__}", repro)
-                self.assertIn(
-                    f"{custom_inductor_config.__name__}.enable_optimisation = True",
-                    repro,
-                )
-        finally:
-            custom_inductor_config.enable_optimisation = old_enable_optimisation
+            self.assertIn(f"import {custom_inductor_config.__name__}", repro)
+            self.assertIn(
+                f"{custom_inductor_config.__name__}.enable_optimisation = True",
+                repro,
+            )
 
     def import_triton_extra_import_kernel(self):
         test_dynamo_dir = os.path.abspath(os.path.dirname(__file__))

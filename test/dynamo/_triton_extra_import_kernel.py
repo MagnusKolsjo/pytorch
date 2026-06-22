@@ -1,5 +1,7 @@
 # Owner(s): ["module: dynamo"]
 
+# A user-defined Triton kernel at module scope, using an imported Triton
+# helper name other than the usual `triton` or `tl` globals.
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
