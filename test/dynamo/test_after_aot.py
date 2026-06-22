@@ -271,12 +271,8 @@ reader.tensor(buf0, (3, 4, 5, 6), (120, 1, 24, 4), is_leaf=True)  # x""",
         test_inductor_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "inductor")
         )
-        old_path = list(sys.path)
-        sys.path.insert(0, test_inductor_dir)
-        try:
+        with patch.object(sys, "path", [test_inductor_dir, *sys.path]):
             custom_inductor_config = importlib.import_module("custom_inductor_config")
-        finally:
-            sys.path[:] = old_path
 
         old_enable_optimisation = custom_inductor_config.enable_optimisation
         try:
@@ -306,12 +302,8 @@ reader.tensor(buf0, (3, 4, 5, 6), (120, 1, 24, 4), is_leaf=True)  # x""",
 
     def import_triton_extra_import_kernel(self):
         test_dynamo_dir = os.path.abspath(os.path.dirname(__file__))
-        old_path = list(sys.path)
-        sys.path.insert(0, test_dynamo_dir)
-        try:
+        with patch.object(sys, "path", [test_dynamo_dir, *sys.path]):
             return importlib.import_module("_triton_extra_import_kernel")
-        finally:
-            sys.path[:] = old_path
 
     @unittest.skipIf(not has_triton(), "requires Triton")
     def test_save_graph_repro_emits_extra_triton_imports(self):
