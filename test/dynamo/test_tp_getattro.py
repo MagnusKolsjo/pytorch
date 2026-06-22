@@ -798,6 +798,250 @@ class TpGetattroTests(torch._dynamo.test_case.TestCase):
         result = torch.compile(fn, backend="eager", fullgraph=True)()
         self.assertEqual(result, "hello")
 
+    # --- UserFunctionVariable attribute mutation ---
+
+    def test_function_setattr_then_getattr(self):
+        def target():
+            return 0
+
+        def fn():
+            target.x = 42
+            return target.x
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertEqual(result, 42)
+
+    def test_function_hasattr_after_setattr(self):
+        def target():
+            return 0
+
+        def fn():
+            target.x = 42
+            return hasattr(target, "x")
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertTrue(result)
+
+    def test_function_preexisting_attr(self):
+        def target():
+            return 0
+
+        target.x = 10
+
+        def fn():
+            return target.x
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertEqual(result, 10)
+
+    def test_function_setattr_persists(self):
+        def target():
+            return 0
+
+        def fn(x):
+            target.my_attr = 99
+            return x + 1
+
+        opt_fn = torch.compile(fn, backend="eager", fullgraph=True)
+        result = opt_fn(torch.tensor(1))
+        self.assertEqual(result, torch.tensor(2))
+        self.assertEqual(target.my_attr, 99)
+
+    # --- PythonModuleVariable attribute mutation ---
+
+    def test_module_setattr_then_getattr(self):
+        import types
+
+        mod = types.ModuleType("test_mod")
+
+        def fn():
+            mod.x = 42
+            return mod.x
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertEqual(result, 42)
+
+    def test_module_hasattr_after_setattr(self):
+        import types
+
+        mod = types.ModuleType("test_mod")
+
+        def fn():
+            mod.x = 42
+            return hasattr(mod, "x")
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertTrue(result)
+
+    def test_module_setattr_persists(self):
+        import types
+
+        mod = types.ModuleType("test_mod")
+
+        def fn(x):
+            mod.my_attr = 99
+            return x + 1
+
+        opt_fn = torch.compile(fn, backend="eager", fullgraph=True)
+        result = opt_fn(torch.tensor(1))
+        self.assertEqual(result, torch.tensor(2))
+        self.assertEqual(mod.my_attr, 99)
+
+    # --- UserDefinedClassVariable attribute mutation ---
+
+    def test_class_setattr_then_getattr(self):
+        class MyClass:
+            pass
+
+        def fn():
+            MyClass.x = 42
+            return MyClass.x
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertEqual(result, 42)
+
+    def test_class_hasattr_after_setattr(self):
+        class MyClass:
+            pass
+
+        def fn():
+            MyClass.x = 42
+            return hasattr(MyClass, "x")
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertTrue(result)
+
+    def test_class_setattr_persists(self):
+        class MyClass:
+            pass
+
+        def fn(x):
+            MyClass.my_attr = 99
+            return x + 1
+
+        opt_fn = torch.compile(fn, backend="eager", fullgraph=True)
+        result = opt_fn(torch.tensor(1))
+        self.assertEqual(result, torch.tensor(2))
+        self.assertEqual(MyClass.my_attr, 99)
+
+    # --- SkipFunctionVariable attribute mutation ---
+
+    def test_skip_function_setattr_then_getattr(self):
+        @torch._dynamo.disable
+        def skipped():
+            return 0
+
+        def fn():
+            skipped.x = 42
+            return skipped.x
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertEqual(result, 42)
+
+    def test_skip_function_setattr_persists(self):
+        @torch._dynamo.disable
+        def skipped():
+            return 0
+
+        def fn(x):
+            skipped.my_attr = 99
+            return x + 1
+
+        opt_fn = torch.compile(fn, backend="eager", fullgraph=True)
+        result = opt_fn(torch.tensor(1))
+        self.assertEqual(result, torch.tensor(2))
+        self.assertEqual(skipped.my_attr, 99)
+
+    def test_skip_function_hasattr_after_setattr(self):
+        @torch._dynamo.disable
+        def skipped():
+            return 0
+
+        def fn():
+            skipped.x = 42
+            return hasattr(skipped, "x")
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertTrue(result)
+
+    def test_polyfilled_function_hasattr_after_setattr(self):
+        def my_polyfill(x):
+            return x
+
+        def my_replacement(x):
+            return x
+
+        torch.compiler.substitute_in_graph(my_polyfill)(my_replacement)
+        try:
+
+            def fn():
+                my_polyfill.x = 42
+                return hasattr(my_polyfill, "x")
+
+            result = torch.compile(fn, backend="eager", fullgraph=True)()
+            self.assertTrue(result)
+        finally:
+            if hasattr(my_polyfill, "x"):
+                del my_polyfill.x
+
+    # --- Additional coverage for setattr mutation paths ---
+
+    def test_two_setattrs_on_same_object(self):
+        def target():
+            return 0
+
+        def fn():
+            target.x = 42
+            target.y = 99
+            return target.x + target.y
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertEqual(result, 141)
+
+    def test_hasattr_nonexistent_on_opted_in_vt(self):
+        def target():
+            return 0
+
+        def fn():
+            target.x = 42
+            return hasattr(target, "nonexistent")
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertFalse(result)
+
+    def test_getattr_with_default_after_setattr(self):
+        def target():
+            return 0
+
+        def fn():
+            target.x = 42
+            return getattr(target, "x", "sentinel")
+
+        result = torch.compile(fn, backend="eager", fullgraph=True)()
+        self.assertEqual(result, 42)
+
+    def test_polyfilled_function_setattr(self):
+        def my_polyfill(x):
+            return x
+
+        def my_replacement(x):
+            return x
+
+        torch.compiler.substitute_in_graph(my_polyfill)(my_replacement)
+        try:
+
+            def fn(x):
+                my_polyfill._my_attr = "mutated"
+                return x + 1
+
+            x = torch.randn(4)
+            result = torch.compile(fn, backend="eager", fullgraph=True)(x)
+            self.assertEqual(my_polyfill._my_attr, "mutated")
+            self.assertEqual(result, x + 1)
+        finally:
+            if hasattr(my_polyfill, "_my_attr"):
+                del my_polyfill._my_attr
+
 
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests

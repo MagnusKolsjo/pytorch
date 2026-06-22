@@ -588,6 +588,12 @@ class VariableTracker(metaclass=VariableTrackerMeta):
         """
         return type(self)
 
+    def get_value_for_setattr(self) -> object | None:
+        """Return the wrapped Python object for generic STORE_ATTR mutation,
+        or None to decline.  Only override for VTs with __dict__ and
+        standard __setattr__."""
+        return None
+
     def lookup_instance_dict(
         self, tx: InstructionTranslatorBase, name: str
     ) -> VariableTracker | None:
@@ -690,6 +696,17 @@ class VariableTracker(metaclass=VariableTrackerMeta):
     def unpack_var_sequence(self, tx: Any) -> list[VariableTracker]:
         raise NotImplementedError
 
+    def _hasattr_check_side_effects(
+        self, tx: InstructionTranslatorBase, name: str
+    ) -> ConstantVariable | None:
+        """If *name* has a pending mutation, return the hasattr result; else None."""
+        if tx.output.side_effects.has_pending_mutation_of_attr(self, name):
+            value = tx.output.side_effects.load_attr(self, name, deleted_ok=True)
+            return variables.ConstantVariable.create(
+                not isinstance(value, variables.DeletedVariable)
+            )
+        return None
+
     def call_obj_hasattr(
         self, tx: InstructionTranslatorBase, name: str
     ) -> ConstantVariable:
@@ -700,6 +717,10 @@ class VariableTracker(metaclass=VariableTrackerMeta):
         AttributeError, return True/False.
         """
         from ..exc import ObservedAttributeError, Unsupported
+
+        result = self._hasattr_check_side_effects(tx, name)
+        if result is not None:
+            return result
 
         saved_exc = tx.exn_vt_stack.fetch_current_exception()
         try:
