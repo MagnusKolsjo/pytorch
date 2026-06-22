@@ -3159,6 +3159,59 @@ class DunderDictVariableTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(items, {"x": 1, "y": 20, "z": 3})
         self.assertEqual(keys, {"x", "y", "z"})
 
+    def test_dunder_dict_pop_reinsert_order(self):
+        # CPython appends a re-inserted key at the end of the dict rather than
+        # reusing its old slot. obj.__dict__ ordering is observable, so popping
+        # then re-adding a key must move it to the end (mirrors
+        # test_dict.DictTest.test_splittable_pop).
+        class MyClass:
+            pass
+
+        @torch.compile(backend="eager", fullgraph=True)
+        def fn():
+            obj = MyClass()
+            obj.x, obj.y, obj.z = 1, 2, 3
+            d = obj.__dict__
+            d.pop("y")
+            d["y"] = 42
+            return list(d), d["y"]
+
+        keys, value = fn()
+        self.assertEqual(keys, ["x", "z", "y"])
+        self.assertEqual(value, 42)
+
+    def test_dunder_dict_pop_missing_raises_keyerror(self):
+        class MyClass:
+            pass
+
+        @torch.compile(backend="eager", fullgraph=True)
+        def fn():
+            obj = MyClass()
+            obj.x = 1
+            d = obj.__dict__
+            d.pop("x")
+            try:
+                d.pop("x")
+                raised = False
+            except KeyError:
+                raised = True
+            return list(d), raised
+
+        self.assertEqual(fn(), ([], True))
+
+    def test_dunder_dict_pop_default(self):
+        class MyClass:
+            pass
+
+        @torch.compile(backend="eager", fullgraph=True)
+        def fn():
+            obj = MyClass()
+            obj.x = 1
+            d = obj.__dict__
+            return d.pop("missing", "fallback"), d.pop("x"), list(d)
+
+        self.assertEqual(fn(), ("fallback", 1, []))
+
     def test_dunder_dict_items_iteration(self):
         """Test iterating over __dict__.items() with mutations"""
 
