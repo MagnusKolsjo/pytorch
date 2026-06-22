@@ -5635,6 +5635,38 @@ class TestLinalg(TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'LU without pivoting is not implemented on the CPU'):
                     f(torch.empty(1, 2, 2), pivot=False)
 
+    #@skipCUDAIfNoCusolver
+    @skipCPUIfNoLapack
+    @dtypes(*floating_and_complex_types())
+    def test_linalg_lu_stability(self, device, dtype):
+        if dtype in (torch.float, torch.double):
+            compute_dtype = torch.double
+        else:
+            compute_dtype = torch.cdouble
+        eps = torch.finfo(dtype).eps
+
+        bs = (4, 16)
+        ns = (257, 1027)
+        make_well_conditioned = partial(make_fullrank_matrices_with_distinct_singular_values, device=device, dtype=dtype)
+        make_ill_conditioned = partial(torch.randn, device=device, dtype=dtype)
+        make_input_methods = (make_well_conditioned, make_ill_conditioned)
+        norm = partial(torch.linalg.norm, dim=(-2, -1), ord=1)
+
+        for b, n, make_input in product(bs, ns, make_input_methods):
+            A = make_input(b, n, n)
+            P, L, U = torch.linalg.lu(A)
+            A, P, L, U = map(lambda t: t.to(compute_dtype), (A, P, L, U))
+
+            # Compute scaled residual as per Netlib
+            # ||PLU - A||_1 / (||A||_1 * n * eps)
+            scaled_residual = norm(P @ L @ U - A)
+            scale = norm(A).mul_(n * eps)
+            scaled_residual = norm(P @ L @ U - A).div_(scale)
+
+            k = 1.0
+            self.assertTrue((scaled_residual < k).all())
+
+
     @precisionOverride({torch.float32: 1e-2, torch.complex64: 1e-2})
     @skipCUDAIfNoCusolver
     @skipCPUIfNoLapack
