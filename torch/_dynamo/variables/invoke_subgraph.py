@@ -995,10 +995,15 @@ def stamp_out_subgraph(
             vt = VariableBuilder(tx, new_source)(value)
             new_lifted_args.append(vt.as_proxy())
 
-    # Generate fake tensor outputs
-    if tx.fake_mode is None:
-        raise AssertionError("tx.fake_mode must not be None for stamp_out_subgraph")
-    with tx.fake_mode:
+    # Generate fake tensor outputs. Under the C++ FakeTensorMode use it instead
+    # of the Python tx.fake_mode: the C++ Fake key is already active during
+    # tracing, so entering the Python mode here would route empty_strided through
+    # the Python constructors op_impl (which rewrites device->meta), and the
+    # active C++ key would then reject the meta device.
+    fake_mode = tx.cpp_fake_mode or tx.fake_mode
+    if fake_mode is None:
+        raise AssertionError("fake_mode must not be None for stamp_out_subgraph")
+    with fake_mode:
         example_value = tuple(
             torch.empty_strided(
                 shape,

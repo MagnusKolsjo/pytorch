@@ -205,6 +205,12 @@ def register_run_and_save_rng_state_op():
         with mode:
             return impl_backend_select(op, *args, **kwargs)
 
+    @run_and_save_rng_state.py_impl(DispatchKey.Fake)
+    def impl_fake_dispatch(op, *args, **kwargs):
+        # C++ fake tensor mode is active in TLS; mirror impl_fake_tensor_mode
+        # without entering a Python mode.
+        return impl_backend_select(op, *args, **kwargs)
+
     @run_and_save_rng_state.py_impl(ProxyTorchDispatchMode)
     def impl_proxy_dispatch_mode(mode, op, *args, **kwargs):
         out = impl_backend_select(op, *args, **kwargs)
@@ -301,6 +307,11 @@ def register_run_with_rng_state_op():
         with mode:
             return op(*args, **kwargs)
 
+    @run_with_rng_state.py_impl(DispatchKey.Fake)
+    def impl_fake_dispatch(rng_state, op, *args, **kwargs):
+        # C++ fake tensor mode is active in TLS; mirror impl_fake_tensor_mode.
+        return op(*args, **kwargs)
+
     @run_with_rng_state.py_functionalize_impl
     def impl_functional(ctx, rng_state, op, *args, **kwargs):
         unwrapped_rng_state = ctx.unwrap_tensors(rng_state)
@@ -360,6 +371,11 @@ def register_graphsafe_run_with_rng_state_op():
     def impl_fake_tensor_mode(mode, op, *args, rng_state=None, **kwargs):
         with mode:
             return op(*args, **kwargs)
+
+    @graphsafe_run_with_rng_state.py_impl(DispatchKey.Fake)
+    def impl_fake_dispatch(op, *args, rng_state=None, **kwargs):
+        # C++ fake tensor mode is active in TLS; mirror impl_fake_tensor_mode.
+        return op(*args, **kwargs)
 
     @graphsafe_run_with_rng_state.py_impl(ProxyTorchDispatchMode)
     def impl_proxy_dispatch_mode(mode, op, *args, rng_state=None, **kwargs):

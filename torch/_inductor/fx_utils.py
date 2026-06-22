@@ -633,7 +633,15 @@ def is_node_realized(node: torch.fx.Node) -> bool:
 def count_flops_fx(node: torch.fx.Node) -> int | None:
     if not countable_fx(node) or isinstance(node.target, str):
         return None
-    with FakeTensorMode(allow_non_fake_inputs=True):
+    # When the C++ fake mode is active (it owns the graph's example values),
+    # don't enter a Python FakeTensorMode: it would try to re-fakeify the C++
+    # fake args and fail. The active C++ Fake key handles dispatch.
+    fake_mode_ctx: contextlib.AbstractContextManager[Any] = (
+        contextlib.nullcontext()
+        if CppFakeTensorMode._get_active_cpp_fake_tensor_mode() is not None
+        else FakeTensorMode(allow_non_fake_inputs=True)
+    )
+    with fake_mode_ctx:
         success, args, kwargs = get_fake_args_kwargs(node)
 
         if success:

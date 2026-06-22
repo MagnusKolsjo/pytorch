@@ -1075,6 +1075,16 @@ bool ConcretePyInterpreterVTable::fake_try_op_impl(
             convert_to_cpp_fake(py::reinterpret_borrow<py::object>(tup[i]));
       }
       result = std::move(converted);
+    } else if (py::isinstance<py::list>(result)) {
+      // List returns (e.g. the _foreach_* ops, whose op_impl hands back the raw
+      // meta tensors for the C++ mode to stamp) need each element converted too.
+      py::list lst = result.cast<py::list>();
+      py::list converted;
+      for (auto item : lst) {
+        converted.append(
+            convert_to_cpp_fake(py::reinterpret_borrow<py::object>(item)));
+      }
+      result = std::move(converted);
     } else {
       result = convert_to_cpp_fake(std::move(result));
     }

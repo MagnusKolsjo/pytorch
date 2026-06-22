@@ -41,7 +41,7 @@ from torch._logging import getArtifactLogger
 from torch._opaque_base import OpaqueBase
 from torch._ops import OpOverload
 from torch._prims_common import CUDARngStateHelper
-from torch._subclasses import FakeTensor
+from torch._subclasses import CppFakeTensorMode, FakeTensor
 from torch.fx.experimental._backward_state import BackwardState
 from torch.fx.experimental.proxy_tensor import HANDLED_TYPES
 from torch.multiprocessing.reductions import StorageWeakRef
@@ -2822,11 +2822,33 @@ class _AutogradBackwardCompiler:
         saved_context = self.lazy_backward_info.saved_context
         saved_compile_context = self.lazy_backward_info.saved_compile_context
 
+        # The backward is lowered lazily from the autograd engine, outside (and
+        # often on a different thread from) the dynamo/AOT phase that registered
+        # the C++ FakeTensorMode, so none is active here. Re-establish it from the
+        # saved tracing context's fake mode (sharing its converter/shape_env) and
+        # activate it around the compile, mirroring the forward joint trace in
+        # aot_dispatch_autograd. Otherwise FakeTensorProp in inductor runs under
+        # the Python fake mode and rejects the backward graph's C++ fake inputs.
+        cpp_fake_ctx: AbstractContextManager[Any] = nullcontext()
+        if dynamo_config.use_cpp_fake_tensor and saved_context is not None:
+            fake_mode = saved_context.fake_mode
+            if fake_mode is not None:
+                cpp_fake_mode = CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
+                if cpp_fake_mode is None:
+                    cpp_fake_mode = CppFakeTensorMode.create_cpp_fake_tensor_mode(
+                        fake_mode.fake_tensor_converter, fake_mode.shape_env
+                    )
+                    cpp_fake_mode.set_allow_fallback_kernels(
+                        fake_mode.allow_fallback_kernels
+                    )
+                cpp_fake_ctx = cpp_fake_mode.activated()
+
         context = torch._C._DisableAutocast if self.disable_amp else nullcontext
         metrics_context = get_metrics_context()
         with (
             tracing(saved_context),
             compile_context(saved_compile_context),
+            cpp_fake_ctx,
             context(),
             track_graph_compiling(self.aot_config, "backward"),
             metrics_context,

@@ -1805,9 +1805,19 @@ def invoke_and_store_as_constant(
                 ],
             )
 
-    args = [convert(x) for x in args]
-    kwargs = {k: convert(v) for k, v in kwargs.items()}
-    res = fn(*args, **kwargs)
+    # assume_constant_result runs the function eagerly on real inputs to bake a
+    # constant. The Python FakeTensorMode is inactive here, but the C++ fake
+    # mode keeps the Fake dispatch key in TLS for the whole trace, so both
+    # building the real args (get_real_value runs ops for computed
+    # intermediates) and the call itself would otherwise be intercepted and
+    # produce fake results. Disable fake mode for the whole computation so the
+    # constant is a real tensor, matching the Python path.
+    from torch._subclasses.fake_tensor import unset_fake_temporarily
+
+    with unset_fake_temporarily():
+        args = [convert(x) for x in args]
+        kwargs = {k: convert(v) for k, v in kwargs.items()}
+        res = fn(*args, **kwargs)
     return tx.output.register_attr_or_module(
         res,
         name,

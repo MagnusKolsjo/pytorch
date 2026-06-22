@@ -183,6 +183,13 @@ def reset() -> None:
 
             reset_cudagraph_trees()
 
+        # The C++ FakeTensorMode stores its mode in TLS at creation and never
+        # clears it, so a mode from a prior compile would otherwise linger and
+        # make _get_active_cpp_fake_tensor_mode()/detect_fake_mode report it as
+        # active. Clear it as part of the fresh-process reset.
+        if hasattr(torch._C, "_exit_fake_tensor_mode"):
+            torch._C._exit_fake_tensor_mode()
+
 
 def reset_code_caches() -> None:
     """

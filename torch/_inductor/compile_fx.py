@@ -1359,16 +1359,21 @@ class _InProcessFxCompile(FxCompile):
                 with torch.no_grad():
                     fake_mode = fake_tensor_prop(gm, example_inputs)
 
-            if (
-                config.use_cpp_fake_tensor
-                and CppFakeTensorMode._get_active_cpp_fake_tensor_mode() is None
-            ):
-                cpp_fake_mode = CppFakeTensorMode.create_cpp_fake_tensor_mode(
-                    fake_mode.fake_tensor_converter, fake_mode.shape_env
-                )
-                cpp_fake_mode.set_allow_fallback_kernels(
-                    fake_mode.allow_fallback_kernels
-                )
+            if config.use_cpp_fake_tensor:
+                # Reuse the cpp mode registered by an earlier phase if present
+                # (it shares fake_mode's shape_env/converter); only create one
+                # if none exists. Either way activate it for the lowering: the
+                # mode is deactivated between phases, so we must turn on the Fake
+                # dispatch key here or symbolic ops dispatch to real kernels.
+                cpp_fake_mode = CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
+                if cpp_fake_mode is None:
+                    cpp_fake_mode = CppFakeTensorMode.create_cpp_fake_tensor_mode(
+                        fake_mode.fake_tensor_converter, fake_mode.shape_env
+                    )
+                    cpp_fake_mode.set_allow_fallback_kernels(
+                        fake_mode.allow_fallback_kernels
+                    )
+                    cpp_fake_stack.callback(torch._C._exit_fake_tensor_mode)
                 cpp_fake_stack.enter_context(cpp_fake_mode.activated())
 
             _recursive_record_original_output_strides(gm)
@@ -3046,16 +3051,16 @@ def _compile_fx_main(
                 return inference_compiler(unlifted_gm, example_inputs_)
 
         with contextlib.ExitStack() as cpp_fake_stack:
-            if (
-                config.use_cpp_fake_tensor
-                and CppFakeTensorMode._get_active_cpp_fake_tensor_mode() is None
-            ):
-                cpp_fake_mode = CppFakeTensorMode.create_cpp_fake_tensor_mode(
-                    fake_mode.fake_tensor_converter, fake_mode.shape_env
-                )
-                cpp_fake_mode.set_allow_fallback_kernels(
-                    fake_mode.allow_fallback_kernels
-                )
+            if config.use_cpp_fake_tensor:
+                cpp_fake_mode = CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
+                if cpp_fake_mode is None:
+                    cpp_fake_mode = CppFakeTensorMode.create_cpp_fake_tensor_mode(
+                        fake_mode.fake_tensor_converter, fake_mode.shape_env
+                    )
+                    cpp_fake_mode.set_allow_fallback_kernels(
+                        fake_mode.allow_fallback_kernels
+                    )
+                    cpp_fake_stack.callback(torch._C._exit_fake_tensor_mode)
                 cpp_fake_stack.enter_context(cpp_fake_mode.activated())
 
             with (

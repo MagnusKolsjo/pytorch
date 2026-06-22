@@ -794,15 +794,34 @@ def aot_function(
             flat_fn, out_spec = create_tree_flattened_fn(fn, args, kwargs)
             (fake_mode, shape_env) = construct_fake_mode(flat_args, aot_config)
             fake_flat_args: FakifiedFlatArgs
-            fake_flat_args, act_input_indices = process_inputs(
-                flat_args, aot_config, fake_mode, shape_env
-            )
-            # TODO: We actually could use the pytree path to make better descs.
-            # Also, the descs here are bad if you do aot_module.
-            fake_flat_args_descs: list[AOTInput] = [
-                PlainAOTInput(i) for i in range(len(fake_flat_args))
-            ]
             with contextlib.ExitStack() as stack:
+                # Dynamo creates the C++ fake mode and AOT reuses it; when AOT
+                # is driven directly (not via Dynamo) none is active, so create
+                # one here -- before process_inputs, which fakeifies inputs as
+                # C++ fake tensors when a C++ mode is active. Mirrors compile_fx.
+                if (
+                    torch._dynamo.config.use_cpp_fake_tensor
+                    and isinstance(fake_mode, FakeTensorMode)
+                    and CppFakeTensorMode._get_active_cpp_fake_tensor_mode() is None
+                ):
+                    cpp_fake_mode = CppFakeTensorMode.create_cpp_fake_tensor_mode(
+                        fake_mode.fake_tensor_converter, shape_env
+                    )
+                    cpp_fake_mode.set_allow_fallback_kernels(
+                        fake_mode.allow_fallback_kernels
+                    )
+                    # create_cpp_fake_tensor_mode sets a persistent global TLS
+                    # mode pointer; reset it when this compile finishes.
+                    stack.callback(torch._C._exit_fake_tensor_mode)
+                    stack.enter_context(cpp_fake_mode.activated())
+                fake_flat_args, act_input_indices = process_inputs(
+                    flat_args, aot_config, fake_mode, shape_env
+                )
+                # TODO: We actually could use the pytree path to make better descs.
+                # Also, the descs here are bad if you do aot_module.
+                fake_flat_args_descs: list[AOTInput] = [
+                    PlainAOTInput(i) for i in range(len(fake_flat_args))
+                ]
                 aot_state = create_aot_state(
                     stack,
                     flat_fn,

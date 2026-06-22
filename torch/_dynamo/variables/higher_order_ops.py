@@ -4860,8 +4860,12 @@ class AutogradFunctionApplyVariable(VariableTracker):
         # (e.g, tensor.requires_grad), which would be used by downstream Dynamo tracing.
         # Since there can be other ops like Triton kernels, which depends on python dispatcher, we have to enable it.
         # TODO - revisit if we need the python dispatcher
+        # Under CPP_FAKETENSOR the C++ fake mode owns the traced fake tensors;
+        # entering the Python fake_mode here would make it intercept ops on
+        # those C++ fake tensors (which it does not own). Use the C++ mode when
+        # present so only one fake mode is active.
         with enable_python_dispatcher():
-            with tx.output.fake_mode:
+            with tx.output.cpp_fake_mode or tx.output.fake_mode:
                 fwd_freevars_args = [_get_fake_value(arg) for arg in fwd_freevars]
 
                 example_value = autograd_function_apply(

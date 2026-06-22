@@ -297,6 +297,13 @@ class CppFakeTensorMode:
         self.allow_fallback_kernels = allow_fallback_kernels
         self.allow_scalar_outputs = False
         self.in_kernel_invocation = False
+        # The C++ fallback always converts non-fake inputs to fake, so it
+        # effectively always allows them. The attribute exists so callers that
+        # toggle it on the Python mode (e.g. fake_tensor_prop's
+        # force_allow_non_fake_inputs path, via mock.patch.object) work uniformly.
+        self.allow_non_fake_inputs = False
+        # Saved Fake-key TLS state for each active `with self:` (supports nesting).
+        self._activation_stack: list[bool] = []
 
     @classmethod
     def create_cpp_fake_tensor_mode(
@@ -314,11 +321,24 @@ class CppFakeTensorMode:
     def _get_active_cpp_fake_tensor_mode(cls) -> CppFakeTensorMode | None:
         return torch._C._get_active_cpp_fake_tensor_mode()
 
-    # op_impl handlers do `with fake_mode:`
+    # `with self:` activates the Fake dispatch key for the duration of the block,
+    # mirroring `with python_fake_mode:`. This matters for callers like MetaProxy
+    # (torch/fx/proxy.py) that run an op under `with fake_mode:` to fake-propagate
+    # it: factory sub-ops (e.g. empty_strided) have no fake tensor input and only
+    # route to Fake when the key is in the TLS include set. The prior state is
+    # saved/restored (rather than calling the force-on/force-off activate()/
+    # deactivate() directly) so this nests correctly: a no-op for op_impl handlers,
+    # which already run with the key active inside the fallback.
     def __enter__(self) -> CppFakeTensorMode:
+        self._activation_stack.append(
+            torch._C._dispatch_tls_is_dispatch_key_included(torch._C.DispatchKey.Fake)
+        )
+        self.activate()
         return self
 
     def __exit__(self, *args: object) -> None:
+        if not self._activation_stack.pop():
+            self.deactivate()
         return None
 
     def activate(self) -> None:

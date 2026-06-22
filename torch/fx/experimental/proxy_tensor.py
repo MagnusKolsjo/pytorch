@@ -52,8 +52,8 @@ from torch._logging import trace_structured
 from torch._ops import HigherOrderOperator, OpOverload
 from torch._subclasses.fake_impls import fast_detach
 from torch._subclasses.fake_tensor import (
-    CppFakeTensorMode,
     cpp_fake_tensor_mode_active,
+    CppFakeTensorMode,
     FakeTensor,
     FakeTensorMode,
     get_plain_tensors,
@@ -2284,7 +2284,28 @@ def selective_decompose(
                 joint_gm, should_decompose, decomposition
             ).run(*args)
 
-    return make_fx(wrap_fn, decomposition_table={})(*args)
+    # C++ fake tensors dispatch to the Fake key via a per-tensor key, so ops with
+    # fake tensor inputs are intercepted during this re-trace. Factory ops (e.g.
+    # empty_strided inside a prim/ref meta) have no tensor input and only route to
+    # Fake when the key is in the TLS include set, i.e. when the mode is activated.
+    # Activate it here so those sub-ops are faked instead of hitting the real
+    # backend (mirrors the joint trace in aot_dispatch_autograd's graph capture).
+    # Only force-deactivate on exit if we turned it on, so we don't disturb an
+    # already-active mode (activate/deactivate are force-on/force-off toggles).
+    cpp_fake_mode = CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
+    activate_cpp_fake = (
+        cpp_fake_mode is not None
+        and not torch._C._dispatch_tls_is_dispatch_key_included(
+            torch._C.DispatchKey.Fake
+        )
+    )
+    if activate_cpp_fake:
+        cpp_fake_mode.activate()
+    try:
+        return make_fx(wrap_fn, decomposition_table={})(*args)
+    finally:
+        if activate_cpp_fake:
+            cpp_fake_mode.deactivate()
 
 
 def wrapper_and_args_for_make_fx(
@@ -2765,7 +2786,9 @@ class _MakefxTracer:
                     )
 
             cpp_fake_mode = (
-                CppFakeTensorMode._get_active_cpp_fake_tensor_mode() if _has_cpp_fake_tensor else None
+                CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
+                if _has_cpp_fake_tensor
+                else None
             )
             if self.fake_tensor_mode is not None and cpp_fake_mode is not None:
                 cpp_fake_mode.set_allow_fallback_kernels(
@@ -3171,6 +3194,8 @@ def _set_unbacked_bindings(out: object, out_proxy: _NestedProxys) -> None:
     # will fail.  Very strange, it probably isn't right for them to be using
     # two fake modes there...
     fake_mode = torch._C._get_dispatch_mode(torch._C._TorchDispatchModeKey.FAKE)
+    if fake_mode is None:
+        fake_mode = CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
     if fake_mode and fake_mode.shape_env:
         if symbol_to_path := compute_unbacked_bindings(fake_mode.shape_env, out):
             if not isinstance(out_proxy, Proxy):

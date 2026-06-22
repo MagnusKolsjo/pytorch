@@ -2560,7 +2560,9 @@ class OutputGraph(OutputGraphCommon):
                 continue
 
             fake_tensor = var.as_proxy().node.meta.get("example_value")
-            if not isinstance(fake_tensor, torch._subclasses.fake_tensor.FakeTensor):
+            # is_fake (not isinstance FakeTensor) so C++ fake tensors, which are
+            # plain torch.Tensors carrying DispatchKey::Fake, are recognized too.
+            if not torch._subclasses.fake_tensor.is_fake(fake_tensor):
                 raise AssertionError(
                     f"expected example_value to be a FakeTensor, got {type(fake_tensor)}"
                 )
