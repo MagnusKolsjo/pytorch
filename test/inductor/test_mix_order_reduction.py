@@ -1161,10 +1161,12 @@ class OverFusionTest(TestBase):
     regression. See #179423.
     """
 
-    @skipIfXpu(msg="XPU Flash Attention backward uses SYCL TLA which does not guarantee "
-               "precision on PVC; fails on Ubuntu 24.04 LTS2 (CI) builds with MKL 2024.2. "
-               "Will be re-enabled once oneDNN adds training support for this attention "
-               "pattern on PVC. See https://github.com/intel/torch-xpu-ops/issues/4094")
+    @skipIfXpu(
+        msg="XPU Flash Attention backward uses SYCL TLA which does not guarantee "
+"precision on PVC; fails on Ubuntu 24.04 LTS2 (CI) builds with MKL 2024.2. "
+"Will be re-enabled once oneDNN adds training support for this attention "
+"pattern on PVC. See https://github.com/intel/torch-xpu-ops/issues/4094"
+    )
     @inductor_config.patch(
         {
             "triton.mix_order_reduction": True,
