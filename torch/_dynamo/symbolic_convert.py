@@ -3186,8 +3186,18 @@ class InstructionTranslatorBase(
         if sys.version_info >= (3, 12):
             # pyrefly: ignore [unsupported-operation]
             if inst.arg % 2:
+                # LOAD_METHOD pushes 2 values (NULL + method), which
+                # break_graph_if_unsupported can't handle (it only
+                # supports 0 or 1 outputs). Use step() fallback.
                 self.LOAD_METHOD(inst)
                 return
+        self._load_attr_break_graph_if_unsupported(inst)
+
+    @break_graph_if_unsupported(
+        push=True,
+        msg_prefix="Encountered graph break when attempting to trace LOAD_ATTR: loading an object's attribute, e.g. x.attr",
+    )
+    def _load_attr_break_graph_if_unsupported(self, inst: Instruction) -> None:
         self._load_attr(inst.argval)
 
     @break_graph_if_unsupported(
