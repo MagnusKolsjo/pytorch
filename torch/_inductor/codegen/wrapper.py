@@ -40,8 +40,9 @@ from torch.fx.experimental.symbolic_shapes import (
 from torch.fx.node import _get_qualified_name
 from torch.multiprocessing.reductions import StorageWeakRef
 from torch.utils._ordered_set import OrderedSet
-from torch.utils._sympy.functions import Max, Min
+from torch.utils._sympy.functions import CleanDiv, Max, Min
 from torch.utils._sympy.singleton_int import SingletonInt
+from torch.utils._sympy.solve import try_solve
 from torch.utils._sympy.symbol import symbol_is_type, SymT
 
 from .. import async_compile, config, debug as inductor_debug, ir
@@ -95,6 +96,14 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 pexpr = PythonPrinter().doprint
+
+
+def _rewrite_symbol_solution_for_int_codegen(expr: sympy.Expr) -> sympy.Expr:
+    expr = sympy.together(sympy.sympify(expr))
+    numerator, denominator = sympy.fraction(expr)
+    if denominator == 1:
+        return numerator
+    return CleanDiv(numerator, denominator)
 
 
 ReuseKey = tuple[torch.device, torch.dtype, str, bool, int]
@@ -2457,6 +2466,7 @@ class PythonWrapperCodegen(CodeGen):
         value: ir.TensorBox,
         bound_vars: OrderedSet[sympy.Symbol],
     ):
+        """Assign symbolic graph inputs and tensor size/stride symbols to locals."""
         code = self.prefix
 
         @functools.cache
@@ -2470,24 +2480,67 @@ class PythonWrapperCodegen(CodeGen):
             return f"{name}_stride"
 
         def maybe_emit_replacement_aliases(sym: sympy.Symbol) -> None:
-            # Deferred runtime asserts reference pre-replacement backed
-            # symbols (e.g. s77) that were replaced to this canonical
-            # symbol (s31) during constraint solving. Emit aliases so
-            # the asserts compile. Skip unbacked symbols — they are
-            # defined separately by the unbacked symbol codegen path.
+            # Deferred runtime asserts and graph input metadata can reference
+            # either side of a backed-symbol replacement. Emit aliases so both
+            # the pre-replacement and canonical names are defined.
             from torch.utils._sympy.symbol import symbol_is_type, SymT
+
+            def is_backed_symbol(s: sympy.Symbol) -> bool:
+                return not symbol_is_type(s, (SymT.UNBACKED_INT, SymT.UNBACKED_FLOAT))
 
             for src, tgt in V.graph.sizevars.shape_env.replacements.items():
                 if (
                     tgt == sym
                     and isinstance(src, sympy.Symbol)
                     and src not in bound_vars
-                    and not symbol_is_type(
-                        src, (SymT.UNBACKED_INT, SymT.UNBACKED_FLOAT)
-                    )
+                    and is_backed_symbol(src)
+                    and is_backed_symbol(sym)
                 ):
                     code.writeline(f"{src} = {sym}")
                     bound_vars.add(src)
+                elif (
+                    src == sym
+                    and isinstance(tgt, sympy.Symbol)
+                    and tgt not in bound_vars
+                    and is_backed_symbol(sym)
+                    and is_backed_symbol(tgt)
+                ):
+                    code.writeline(f"{tgt} = {sym}")
+                    bound_vars.add(tgt)
+
+        def codegen_symbol(
+            sym_or_exp: sympy.Symbol | sympy.Expr,
+            base_name: str,
+            name_fn: Callable[[str], str],
+            dim: int,
+        ) -> None:
+            if isinstance(sym_or_exp, sympy.Symbol):
+                if sym_or_exp in bound_vars:
+                    return
+                code.writeline(f"{sym_or_exp} = {name_fn(base_name)}[{dim}]")
+                bound_vars.add(sym_or_exp)
+                maybe_emit_replacement_aliases(sym_or_exp)
+            elif isinstance(sym_or_exp, sympy.Expr):
+                undefined_symbols = [
+                    sym for sym in sym_or_exp.free_symbols if sym not in bound_vars
+                ]
+                if len(undefined_symbols) != 1:
+                    # Skip constants and underdetermined expressions; a later
+                    # input may define the remaining symbols directly.
+                    return
+
+                free_symbol = undefined_symbols.pop()
+                base_size_or_stride = name_fn(base_name)
+                dim_value = sympy.Symbol(f"{base_size_or_stride}_{dim}", integer=True)
+                code.writeline(f"{dim_value} = {base_size_or_stride}[{dim}]")
+                solution = try_solve(sympy.Eq(sym_or_exp, dim_value), free_symbol)
+                if solution is None:
+                    return
+
+                expr = _rewrite_symbol_solution_for_int_codegen(solution[1])
+                code.writeline(f"{free_symbol} = {pexpr(expr)}")
+                bound_vars.add(free_symbol)
+                maybe_emit_replacement_aliases(free_symbol)
 
         if isinstance(value, sympy.Expr):
             if not isinstance(value, sympy.Symbol) or value in bound_vars:
@@ -2497,14 +2550,9 @@ class PythonWrapperCodegen(CodeGen):
             maybe_emit_replacement_aliases(value)
         elif isinstance(value, ir.TensorBox):
             for dim, size in enumerate(value.get_size()):
-                if isinstance(size, sympy.Symbol) and size not in bound_vars:
-                    code.writeline(f"{size} = {sizeof(name)}[{dim}]")
-                    bound_vars.add(size)
-                    maybe_emit_replacement_aliases(size)
+                codegen_symbol(size, name, sizeof, dim)
             for dim, stride in enumerate(value.get_stride()):
-                if isinstance(stride, sympy.Symbol) and stride not in bound_vars:
-                    code.writeline(f"{stride} = {strideof(name)}[{dim}]")
-                    bound_vars.add(stride)
+                codegen_symbol(stride, name, strideof, dim)
         elif isinstance(
             value, (ir.TorchBindObject, ir.GeneratorState, ir.OpaqueObjectState)
         ):
