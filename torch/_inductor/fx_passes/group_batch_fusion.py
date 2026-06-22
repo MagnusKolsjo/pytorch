@@ -738,16 +738,35 @@ class PreGradBatchLinearFusion(BatchFusion):
         counters["inductor"]["batch_linear"] += 1
 
 
-# Cap the contracted width we are willing to split. Past this the original
-# linear is compute-bound enough that the cat it removes is in the noise, while
-# the split still pays N launches plus the partial-sum adds, so it tends to lose.
-CAT_LINEAR_MAX_TOTAL_WIDTH = 384
-# Skip slivers: a piece this thin turns into a launch-bound matmul whose own
-# overhead outweighs the slice of the cat traffic it saves.
+# Profitability gates for cat_linear (opt-in; numbers come from the sweep in the
+# PR description). The split only wins for a narrow output fed by a large,
+# memory-bound concat, so gate on output width and concat traffic.
+# Widest win output is 96; first loss at N=128.
+CAT_LINEAR_MAX_OUTPUT_WIDTH = 96
+# Only the concat's M*K_total*dtype_bytes of HBM traffic is removed, so it has to
+# cover the per-piece launch + reduce. Bytes, so fp32 trips it at half the bf16
+# element count.
+CAT_LINEAR_CAT_TRAFFIC_FLOOR_BYTES = 512 * 1024 * 1024
+# Width isn't the profit lever (every win has K_total >= 512); kept as a backstop.
+CAT_LINEAR_MAX_TOTAL_WIDTH = 1 << 30
+# Skip slivers: a piece this thin is a launch-bound matmul with no upside.
 CAT_LINEAR_MIN_PIECE_WIDTH = 8
-# Keep the fan-out small. More pieces means more kernel launches and more
-# operator.add nodes in the reduce, which eats the cat saving.
+# More parts means more launches and reduce-adds; >3 lost in the sweep.
 CAT_LINEAR_MAX_PARTS = 3
+
+
+def _weight_hoist_anchor(graph, weight):
+    # Insert hoisted slices after the weight's own def, or after the last
+    # placeholder when it's a lifted input (can't insert a call between placeholders).
+    if weight.op == "placeholder":
+        anchor = weight
+        for n in graph.nodes:
+            if n.op == "placeholder":
+                anchor = n
+            else:
+                break
+        return anchor
+    return weight
 
 
 def _meta_shape(node):
@@ -824,6 +843,22 @@ def match_cat_linear(node: torch.fx.Node):
     if w_shape is None or len(w_shape) != 2 or int(w_shape[-1]) != k_total:
         return None
 
+    # N is the profit variable; wide outputs are compute-bound and lose the split.
+    n_out = int(w_shape[0])
+    if n_out > CAT_LINEAR_MAX_OUTPUT_WIDTH:
+        return None
+
+    # traffic = prod(leading dims) * k_total * dtype_bytes.
+    cat_val = cat_in.meta.get("example_value")
+    if cat_val is None:
+        cat_val = cat_in.meta.get("val")
+    item_bytes = getattr(getattr(cat_val, "dtype", None), "itemsize", 2)
+    m_lead = 1
+    for d in cat_shape[:-1]:
+        m_lead *= int(d)
+    if m_lead * k_total * item_bytes < CAT_LINEAR_CAT_TRAFFIC_FLOOR_BYTES:
+        return None
+
     return parts, weight, bias, offsets
 
 
@@ -863,6 +898,14 @@ class CatLinearFusion(BatchFusion):
         return ("cat_linear", node)
 
     def fuse(self, graph: torch.fx.GraphModule, subset: list[torch.fx.Node]):
+        # Slice+clone each weight once per graph and hoist to entry, so a weight
+        # matched by several cat_linears (weight-tied blocks) isn't re-sliced at
+        # every site. Keyed per graph: the fusion object is reused across compiles.
+        if getattr(self, "_piece_gid", None) != id(graph):
+            self._piece_gid = id(graph)
+            self._piece_cache = {}
+        cache = self._piece_cache
+
         for node in subset:
             matched = node.meta.pop("cat_linear_match", None)
             if matched is None:
@@ -872,30 +915,35 @@ class CatLinearFusion(BatchFusion):
             parts, weight, bias, offsets = matched
             node_val = node.meta.get("example_value", node.meta.get("val"))
             weight_val = weight.meta.get("example_value", weight.meta.get("val"))
+            anchor = _weight_hoist_anchor(graph, weight)
 
             with graph.inserting_before(node):  # type: ignore[operator]
                 partials = []
                 for i, part in enumerate(parts):
-                    # slice+clone gives each piece a contiguous weight. In the
-                    # frozen/inference path these fold to constants; in the
-                    # training/non-frozen path the params are lifted to inputs so
-                    # the slice+clone re-run every forward. That cost is weight-
-                    # only (no activation) and is already in the measured win, so
-                    # we keep it here rather than hoisting.
-                    w_slice = graph.call_function(  # type: ignore[operator]
-                        aten.slice.Tensor, args=(weight, 1, offsets[i], offsets[i + 1])
-                    )
-                    w_cont = graph.call_function(  # type: ignore[operator]
-                        aten.clone.default,
-                        args=(w_slice,),
-                        kwargs={"memory_format": torch.contiguous_format},
-                    )
-                    if weight_val is not None:
-                        sv = aten.slice.Tensor(
-                            weight_val, 1, offsets[i], offsets[i + 1]
-                        )
-                        w_slice.meta["example_value"] = sv
-                        w_cont.meta["example_value"] = sv.contiguous()
+                    key = (weight, offsets[i], offsets[i + 1])
+                    w_cont = cache.get(key)
+                    if w_cont is None:
+                        # slice is a differentiable view of the full weight; the
+                        # clone makes each GEMM operand contiguous. Folds to a const
+                        # when frozen; in training it's a cheap weight-only op.
+                        with graph.inserting_after(anchor):
+                            w_slice = graph.call_function(  # type: ignore[operator]
+                                aten.slice.Tensor,
+                                args=(weight, 1, offsets[i], offsets[i + 1]),
+                            )
+                        with graph.inserting_after(w_slice):
+                            w_cont = graph.call_function(  # type: ignore[operator]
+                                aten.clone.default,
+                                args=(w_slice,),
+                                kwargs={"memory_format": torch.contiguous_format},
+                            )
+                        if weight_val is not None:
+                            sv = aten.slice.Tensor(
+                                weight_val, 1, offsets[i], offsets[i + 1]
+                            )
+                            w_slice.meta["example_value"] = sv
+                            w_cont.meta["example_value"] = sv.contiguous()
+                        cache[key] = w_cont
                     # bias rides on the first piece only; folding it into the
                     # reduce-add would just be an extra node.
                     out_i = graph.call_function(  # type: ignore[operator]

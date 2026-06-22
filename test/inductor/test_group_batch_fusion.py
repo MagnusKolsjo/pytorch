@@ -1469,10 +1469,19 @@ class CatLinearTwoUserMod(torch.nn.Module):
     post_grad_fusion_options={},
 )
 class TestCatLinearFusion(TestCase):
-    def _fires(self, module, parts):
+    def _fires(self, module, parts, traffic_floor=0):
+        # unit-test tensors never reach the real 512 MiB floor, so unless a test
+        # is exercising the floor, drop it to 0 and let the shape gates decide.
+        from unittest import mock
+
+        from torch._inductor.fx_passes import group_batch_fusion as gbf
+
         counters.clear()
-        traced = torch.compile(module)
-        traced(parts)
+        torch._dynamo.reset()
+        with mock.patch.object(
+            gbf, "CAT_LINEAR_CAT_TRAFFIC_FLOOR_BYTES", traffic_floor
+        ):
+            torch.compile(module)(parts)
         n = counters["inductor"]["cat_linear"]
         counters.clear()
         return n
@@ -1481,9 +1490,12 @@ class TestCatLinearFusion(TestCase):
         # run the pre-grad pass on the dynamo graph and hand the rewritten
         # GraphModule back so we can check the cat is really gone, not just that
         # the counter bumped (the counter increments inside fuse, before DCE).
+        from unittest import mock
+
         from torch._inductor.fx_passes.group_batch_fusion import (
             group_batch_fusion_passes,
         )
+        from torch._inductor.fx_passes import group_batch_fusion as gbf
 
         captured = {}
 
@@ -1499,7 +1511,8 @@ class TestCatLinearFusion(TestCase):
 
         counters.clear()
         torch._dynamo.reset()
-        torch.compile(module, backend=backend)(parts)
+        with mock.patch.object(gbf, "CAT_LINEAR_CAT_TRAFFIC_FLOOR_BYTES", 0):
+            torch.compile(module, backend=backend)(parts)
         return captured["gm"]
 
     def _node_counts(self, gm):
@@ -1567,10 +1580,24 @@ class TestCatLinearFusion(TestCase):
         parts = [torch.randn(4, 16) for _ in range(4)]
         self.assertEqual(self._fires(m, parts), 0)
 
-    def test_cat_linear_rejects_over_width(self):
-        m = CatLinearMod([256, 256], 32)
-        parts = [torch.randn(4, 256), torch.randn(4, 256)]
+    def test_cat_linear_rejects_wide_output(self):
+        # N=128 is past the N<=96 ceiling; a wide output is compute-bound.
+        m = CatLinearMod([64, 64], 128)
+        parts = [torch.randn(4, 64), torch.randn(4, 64)]
         self.assertEqual(self._fires(m, parts), 0)
+
+    def test_cat_linear_rejects_small_traffic(self):
+        # all shape gates pass; at the real 512 MiB floor this concat is too small.
+        from torch._inductor.fx_passes import group_batch_fusion as gbf
+
+        m = CatLinearMod([16, 16], 32)
+        parts = [torch.randn(4, 16), torch.randn(4, 16)]
+        self.assertEqual(
+            self._fires(
+                m, parts, traffic_floor=gbf.CAT_LINEAR_CAT_TRAFFIC_FLOOR_BYTES
+            ),
+            0,
+        )
 
     def test_cat_linear_rejects_thin_piece(self):
         m = CatLinearMod([4, 16], 32)
@@ -1584,30 +1611,40 @@ class TestCatLinearFusion(TestCase):
 
     @requires_gpu()
     def test_cat_linear_numerics(self):
+        from unittest import mock
+
+        from torch._inductor.fx_passes import group_batch_fusion as gbf
+
         for has_bias in [True, False]:
             counters.clear()
             torch._dynamo.reset()
             module = CatLinearMod(
-                [176, 176], 256, has_bias=has_bias, device=GPU_TYPE
+                [176, 176], 64, has_bias=has_bias, device=GPU_TYPE
             ).to(torch.bfloat16)
             parts = [
                 torch.randn(64, 176, device=GPU_TYPE, dtype=torch.bfloat16),
                 torch.randn(64, 176, device=GPU_TYPE, dtype=torch.bfloat16),
             ]
             ref = module(parts)
-            res = torch.compile(module)(parts)
+            with mock.patch.object(gbf, "CAT_LINEAR_CAT_TRAFFIC_FLOOR_BYTES", 0):
+                res = torch.compile(module)(parts)
             self.assertEqual(counters["inductor"]["cat_linear"], 1)
             self.assertEqual(ref, res, rtol=1.6e-2, atol=1e-2)
             counters.clear()
 
     def test_cat_linear_numerics_cpu(self):
+        from unittest import mock
+
+        from torch._inductor.fx_passes import group_batch_fusion as gbf
+
         for has_bias in [True, False]:
             counters.clear()
             torch._dynamo.reset()
             module = CatLinearMod([24, 24], 32, has_bias=has_bias)
             parts = [torch.randn(8, 24), torch.randn(8, 24)]
             ref = module(parts)
-            res = torch.compile(module)(parts)
+            with mock.patch.object(gbf, "CAT_LINEAR_CAT_TRAFFIC_FLOOR_BYTES", 0):
+                res = torch.compile(module)(parts)
             self.assertEqual(counters["inductor"]["cat_linear"], 1)
             self.assertEqual(ref, res)
             counters.clear()
