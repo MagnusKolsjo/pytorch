@@ -5682,6 +5682,47 @@ class TestLinalg(TestCase):
             K = 1.0
             self.assertTrue((scaled_residual < K).all())
 
+    @onlyCUDA
+    @skipCUDAIfNoCusolver
+    @setLinalgBackendsToDefaultFinally
+    @dtypes(*floating_and_complex_types())
+    def test_linalg_batched_lu_solve_stability_large_inputs(self, device, dtype):
+        # Check whether LU solve is stable. Also tests the LU factorization.
+        # We use the criterion from Netlib
+        # scaled_residul < K, where
+        # scaled_residual = ||B - A @ X|| / (||A|| * ||B|| * eps)
+        # Netlib uses 1-norm, while MAGMA uses Frobenius norm.
+        if dtype in (torch.float, torch.double):
+            compute_dtype = torch.double
+        else:
+            compute_dtype = torch.cdouble
+        eps = torch.finfo(dtype).eps
+
+        bs = (4, 16)
+        ns = (259, 1027)
+        make_well_conditioned = partial(make_fullrank_matrices_with_distinct_singular_values, device=device, dtype=dtype)
+        make_ill_conditioned = partial(torch.randn, device=device, dtype=dtype)
+        make_input_methods = (make_well_conditioned, make_ill_conditioned)
+        norm = partial(torch.linalg.norm, dim=(-2, -1), ord=1)
+
+        torch.backends.cuda.preferred_linalg_library("cusolver")
+        for b, n, make_input in product(bs, ns, make_input_methods):
+            A = make_input(b, n, n)
+            LU, pivots = torch.linalg.lu_factor(A)
+
+            B = make_input(b, n, n // 10)
+            X = torch.linalg.lu_solve(LU, pivots, B)
+
+            A, X, B = map(lambda t: t.to(compute_dtype), (A, X, B))
+
+            scale = norm(A).mul_(norm(B)).mul_(eps)
+            scaled_residual = norm(B - A @ X).div_(scale)
+
+            # Very conservative - Netlib uses 30, and so is MAGMA, see
+            # test_linalg_batched_lu_stability_large_inputs
+            K = 30.0
+            self.assertTrue((scaled_residual < K).all())
+
     @precisionOverride({torch.float32: 1e-2, torch.complex64: 1e-2})
     @skipCUDAIfNoCusolver
     @skipCPUIfNoLapack
