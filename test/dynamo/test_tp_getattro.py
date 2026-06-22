@@ -726,6 +726,90 @@ class TpGetattroTests(torch._dynamo.test_case.TestCase):
         result = torch.compile(fn, backend="eager")(MyObj())
         self.assertEqual(result, 123)
 
+    def test_dunder_getattr_bypasses_instance_dict(self):
+        """obj.__getattr__("x") should call __getattr__ directly,
+        not go through full attribute resolution."""
+
+        class MyObj:
+            def __init__(self):
+                self.x = "from_dict"
+
+            def __getattr__(self, name):
+                return "from_getattr"
+
+        def fn(obj):
+            return obj.__getattr__("x")
+
+        result = torch.compile(fn, backend="eager")(MyObj())
+        self.assertEqual(result, "from_getattr")
+
+    def test_dunder_getattr_no_fallback_raises(self):
+        """obj.__getattr__("x") on an object without __getattr__ should raise."""
+
+        class MyObj:
+            pass
+
+        def fn(obj):
+            try:
+                obj.__getattr__("x")
+                return False
+            except AttributeError:
+                return True
+
+        result = torch.compile(fn, backend="eager")(MyObj())
+        self.assertTrue(result)
+
+    def test_dunder_getattribute_skips_getattr_fallback(self):
+        """obj.__getattribute__("x") should NOT fall back to __getattr__."""
+
+        class MyObj:
+            def __getattr__(self, name):
+                return "from_getattr"
+
+        def fn(obj):
+            try:
+                obj.__getattribute__("nonexistent")
+                return False
+            except AttributeError:
+                return True
+
+        result = torch.compile(fn, backend="eager")(MyObj())
+        self.assertTrue(result)
+
+    def test_dunder_getattribute_finds_instance_attr(self):
+        """obj.__getattribute__("x") should still find instance dict attrs."""
+
+        class MyObj:
+            def __init__(self):
+                self.x = 42
+
+        def fn(obj):
+            return obj.__getattribute__("x")
+
+        result = torch.compile(fn, backend="eager")(MyObj())
+        self.assertEqual(result, 42)
+
+    def test_super_getattribute_skips_getattr(self):
+        """super().__getattribute__("x") should NOT fall back to __getattr__."""
+
+        class Base:
+            def __getattr__(self, name):
+                return "from_getattr"
+
+        class Child(Base):
+            def lookup(self, name):
+                return super().__getattribute__(name)
+
+        def fn(obj):
+            try:
+                obj.lookup("nonexistent")
+                return False
+            except AttributeError:
+                return True
+
+        result = torch.compile(fn, backend="eager")(Child())
+        self.assertTrue(result)
+
     # --- BoundBuiltinMethodVariable slots ---
 
     def test_bound_builtin_method_hash(self):
