@@ -424,6 +424,17 @@ def get_caching_autotuner_plugins(
     return plugins
 
 
+def _resolve_load_device(device: int | None, device_type: str) -> int:
+    # compile-on-one-rank: a None device is the rank-agnostic marker; resolve it to the
+    # current device at load time so a shared kernel's cubin loads on the running rank's
+    # GPU rather than a baked compile-time index.
+    if device is not None:
+        return device
+    from torch._dynamo.device_interface import get_interface_for_device
+
+    return get_interface_for_device(device_type.replace("hip", "cuda")).current_device()
+
+
 class CachingAutotuner(KernelInterface):
     """
     Simplified version of Triton autotuner that has no invalidation
@@ -458,6 +469,8 @@ class CachingAutotuner(KernelInterface):
 
         self.fn = fn
         self.device_props: DeviceProperties = triton_meta["device"]
+        # device may be None under compile-on-one-rank (rank-agnostic); it is resolved to
+        # the current device at load time (see _resolve_load_device), not baked here.
         self.triton_meta = {
             **triton_meta,
             "device": self.device_props.index,
@@ -955,7 +968,10 @@ class CachingAutotuner(KernelInterface):
         launchers = []
         exc = None
         # DeviceGuard ensures each launcher's binary loads onto the right device.
-        with DeviceGuard(device_interface, self.triton_meta["device"]):
+        with DeviceGuard(
+            device_interface,
+            _resolve_load_device(self.triton_meta["device"], self.device_props.type),
+        ):
             for result in self.compile_results:
                 launcher, exc = self._make_launcher(result)
                 if launcher is not None:
@@ -2715,7 +2731,9 @@ class StaticTritonCompileResult(CompileResult[_T]):
         )
         binary_ext = GPU_KERNEL_BIN_EXTS.get(device_type, "cubin")
         cubin_location = os.path.join(
-            triton_cache_dir(self.compile_meta.get("device", 0)),
+            triton_cache_dir(
+                _resolve_load_device(self.compile_meta.get("device"), device_type)
+            ),
             triton_hash_to_path_key(self.kernel.hash),
             f"{self.kernel.name}{binary_ext}",
         )
@@ -2736,9 +2754,13 @@ class StaticTritonCompileResult(CompileResult[_T]):
         # Load the binary on the parent
         if not self.kernel.cubin_path:
             self.reload_cubin_path()
-        device = self.compile_meta.get("device", 0)
-        if device is None:
-            device = 0
+        # compile-on-one-rank: a None device in compile_meta marks a rank/device-agnostic
+        # kernel, so the launcher must keep its loaded handles per device.
+        self.kernel.device_agnostic = self.compile_meta.get("device") is None
+        device = _resolve_load_device(
+            self.compile_meta.get("device"),
+            self.compile_meta.get("device_type", "cuda"),
+        )
         self.kernel.load_kernel(device)
         scope = {
             "runner": self.kernel.run,
