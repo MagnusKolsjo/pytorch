@@ -1011,7 +1011,7 @@ void fakeFallback(
 
   auto device_from_args = find_and_rewrite_device_args(
       stack, arguments_begin, num_arguments, schema, /*rewrite_to_meta=*/true);
-  if (!common_device.has_value()) {
+  if (device_from_args.has_value()) {
     common_device = device_from_args;
   }
   if (!common_device.has_value()) {
