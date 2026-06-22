@@ -6527,7 +6527,6 @@ def log_normal(self, mean=1, std=2, generator=None):
     return torch.exp(std * torch.randn_like(self) + mean)
 
 
-# TODO: add support for functionalization aten.normal_functional
 # NOTE: the device and dtype will be ignored when shape is None
 @register_decomposition(aten.normal)
 @out_wrapper()
@@ -6594,6 +6593,19 @@ def normal(
 @register_decomposition(aten.normal_)
 def normal_(self, mean=0, std=1, *, generator=None):
     return normal(mean, std, self.shape, out=self, generator=generator)
+
+
+@register_decomposition(aten.normal_functional)
+def normal_functional(self, mean=0, std=1, *, generator=None):
+    res = normal(
+        mean,
+        std,
+        self.shape,
+        dtype=self.dtype,
+        device=self.device,
+        generator=generator,
+    )
+    return res.contiguous(memory_format=utils.suggest_memory_format(self))
 
 
 @_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)

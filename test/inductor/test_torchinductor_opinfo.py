@@ -249,7 +249,6 @@ inductor_expected_failures_single_sample["cpu"] = {
     "resize_as_": {b8, f16, f32, f64, i32, i64},
     "histc": {f16},
     "nonzero_static": {b8, f16, f32, f64, i32, i64},
-    ("normal", "in_place"): {f16, f32, f64},
     ("sparse.mm", "reduce"): {f32, f64, f16},
     "sparse.sampled_addmm": {f32, f64},
     "to_sparse": {
@@ -262,7 +261,6 @@ inductor_expected_failures_single_sample["cpu"] = {
 
 inductor_expected_failures_single_sample["cuda"] = {
     "_upsample_bilinear2d_aa": {f16, f32, f64},
-    ("normal", "in_place"): {f16, f32, f64},
     "sparse.sampled_addmm": {f32, f64},
     "torch.ops.aten._flash_attention_forward": {f16},
     "torch.ops.aten._efficient_attention_forward": {f16, f32},
@@ -278,7 +276,6 @@ inductor_expected_failures_single_sample["cuda"] = {
 
 inductor_expected_failures_single_sample["xpu"] = {
     "_upsample_bilinear2d_aa": {f16, f32, f64},
-    ("normal", "in_place"): {f16, f32, f64},
     "sparse.sampled_addmm": {f32, f64},
     "tan": {f16},
     "torch.ops.aten._flash_attention_forward": {f16},
