@@ -2958,7 +2958,22 @@ class GraphLowering(torch.fx.Interpreter):
 
         return total_bytes, node_counts, node_runtimes
 
-    # No-op to be patched for unit tests
+    # Process-global codegen hook. When set, it is invoked with a freshly codegen'd or
+    # cache-restored Python wrapper module's source. It fires from three sites, all
+    # passing the python wrapper source (never the cpp_wrapper / FileBackedGraphModule
+    # source):
+    #   1. _compile_to_module_lines (this file) on the fresh ValueWithLineMap codegen
+    #      path -- a true cache MISS that codegens the module here.
+    #   2. codecache.py (FxGraphCache) when restoring a cached graph in-process -- a
+    #      cache HIT that replays the stored source instead of re-codegen'ing.
+    #   3. compile_fx_ext.py when restoring a graph produced by an out-of-process
+    #      subprocess or RemoteExecution worker -- the worker codegen'd it, so the
+    #      parent fires the hook on receipt.
+    # The two restore firings (2, 3) are what let torch._inductor.compile_to_python
+    # capture the runnable module on a WARM cache (when no fresh codegen happens here),
+    # so it relies on all three. It is also patched by unit tests
+    # (run_and_get_code / get_code). Callers set and restore it (compile_to_python does
+    # so in a finally).
     save_output_code: Callable[[str], None] | None = None
 
     def compile_to_module(self) -> CompiledModule:
