@@ -6605,7 +6605,13 @@ def normal_functional(self, mean=0, std=1, *, generator=None):
         device=self.device,
         generator=generator,
     )
-    return res.contiguous(memory_format=utils.suggest_memory_format(self))
+    if self.stride() == res.stride():
+        return res
+    perm, _ = utils.compute_elementwise_output_logical_to_physical_perm(self)
+    perm_shape = utils.apply_perm(self.shape, perm)
+    new_stride = utils.make_contiguous_strides_for(perm_shape)
+    new_stride = utils.apply_perm(new_stride, utils.invert_perm(perm))
+    return res.as_strided(self.shape, new_stride)
 
 
 @_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
