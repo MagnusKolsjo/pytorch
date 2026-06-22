@@ -33,6 +33,7 @@ from torch.testing._internal.inductor_utils import (
     HAS_XPU_AND_TRITON,
 )
 from torch.testing._internal.logging_utils import (
+    log_settings,
     LoggingTestCase,
     make_logging_test,
     make_settings_test,
@@ -166,6 +167,25 @@ class LoggingTests(LoggingTestCase):
     test_bytecode = multi_record_test(2, bytecode=True)
     test_output_code = multi_record_test(3, output_code=True)
     test_aot_graphs = multi_record_test(3, aot_graphs=True)
+
+    def test_handler_watcher_ignores_external_handlers(self):
+        logger = logging.getLogger("torch._dynamo")
+        external_records = []
+
+        class ExternalHandler(logging.Handler):
+            def emit(self, record):
+                external_records.append(record)
+
+        external_handler = ExternalHandler()
+        logger.addHandler(external_handler)
+        try:
+            records = []
+            with log_settings("dynamo"), self._handler_watcher(records):
+                logger.info("hi")
+            self.assertEqual(len(records), 1)
+            self.assertEqual(len(external_records), 1)
+        finally:
+            logger.removeHandler(external_handler)
 
     @requires_gpu
     @make_logging_test(schedule=True)
