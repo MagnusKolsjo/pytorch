@@ -31,6 +31,7 @@
 #include <c10/util/AbortHandler.h>
 #include <c10/util/Backtrace.h>
 #include <c10/util/Logging.h>
+#include <c10/util/TypeCast.h>
 #include <c10/util/irange.h>
 #include <c10/util/thread_name.h>
 #include <libshm.h>
@@ -40,6 +41,7 @@
 #include <torch/csrc/utils/pybind.h>
 #include <cstdlib>
 #include <iostream>
+#include <typeindex>
 #include <unordered_map>
 
 #include <ATen/ThreadLocalPythonObjects.h>
@@ -158,6 +160,118 @@ namespace py = pybind11;
 static PyObject* module;
 
 static THPGenerator* THPDefaultCPUGenerator = nullptr;
+
+namespace {
+
+struct THPOpaqueBasePybindShim {};
+
+void opaqueBaseNoopDealloc(py::detail::value_and_holder& vh) {
+  (void)vh;
+}
+
+void markOpaqueBaseHolderConstructed(PyObject* self) {
+  auto* inst = reinterpret_cast<py::detail::instance*>(self);
+  py::detail::values_and_holders vhs(inst);
+  for (auto& vh : vhs) {
+    if (vh.type != nullptr &&
+        *vh.type->cpptype == typeid(THPOpaqueBasePybindShim)) {
+      vh.set_holder_constructed();
+      return;
+    }
+  }
+}
+
+void opaqueBaseInitInstance(
+    py::detail::instance* inst,
+    const void* holder_ptr) {
+  (void)holder_ptr;
+  markOpaqueBaseHolderConstructed(reinterpret_cast<PyObject*>(inst));
+}
+
+PyObject* opaqueBaseNew(PyTypeObject* type, PyObject* args, PyObject* kwargs) {
+  (void)args;
+  (void)kwargs;
+  auto* self = py::detail::make_new_instance(type);
+  markOpaqueBaseHolderConstructed(self);
+  return self;
+}
+
+int opaqueBaseInit(PyObject* self, PyObject* args, PyObject* kwargs) {
+  (void)args;
+  (void)kwargs;
+  markOpaqueBaseHolderConstructed(self);
+  return 0;
+}
+
+void registerOpaqueBasePybindTypeInfo(PyTypeObject* type) {
+  auto* tinfo = new py::detail::type_info();
+  tinfo->type = type;
+  tinfo->cpptype = &typeid(THPOpaqueBasePybindShim);
+  tinfo->type_size = sizeof(THPOpaqueBasePybindShim);
+  tinfo->type_align = alignof(THPOpaqueBasePybindShim);
+  tinfo->holder_size_in_ptrs = 0;
+  tinfo->operator_new = nullptr;
+  tinfo->init_instance = opaqueBaseInitInstance;
+  tinfo->dealloc = opaqueBaseNoopDealloc;
+  tinfo->simple_type = true;
+  tinfo->simple_ancestors = true;
+  tinfo->module_local = false;
+  tinfo->holder_enum_v = py::detail::holder_enum_t::undefined;
+
+  py::detail::with_internals([&](py::detail::internals& internals) {
+    tinfo->direct_conversions = &internals.direct_conversions[std::type_index(
+        typeid(THPOpaqueBasePybindShim))];
+    internals.registered_types_py[type] = {tinfo};
+  });
+}
+
+py::object createOpaqueBasePybindType() {
+  auto& internals = py::detail::get_internals();
+  auto name =
+      py::reinterpret_steal<py::object>(PYBIND11_FROM_STRING("_OpaqueBase"));
+  auto* heap_type = reinterpret_cast<PyHeapTypeObject*>(
+      internals.default_metaclass->tp_alloc(internals.default_metaclass, 0));
+  if (heap_type == nullptr) {
+    pybind11::pybind11_fail("_OpaqueBase: error allocating type");
+  }
+
+  heap_type->ht_name = name.inc_ref().ptr();
+#ifdef PYBIND11_BUILTIN_QUALNAME
+  heap_type->ht_qualname = name.inc_ref().ptr();
+#endif
+
+  auto* type = &heap_type->ht_type;
+  type->tp_name = "torch._C._OpaqueBase";
+  type->tp_base = py::detail::type_incref(
+      reinterpret_cast<PyTypeObject*>(internals.instance_base));
+  type->tp_basicsize = static_cast<ssize_t>(sizeof(py::detail::instance));
+  type->tp_flags =
+      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+  type->tp_new = opaqueBaseNew;
+  type->tp_init = opaqueBaseInit;
+  type->tp_dealloc = py::detail::pybind11_object_dealloc;
+  type->tp_weaklistoffset = offsetof(py::detail::instance, weakrefs);
+
+  if (PyType_Ready(type) < 0) {
+    pybind11::pybind11_fail("_OpaqueBase: PyType_Ready failed");
+  }
+
+  auto result =
+      py::reinterpret_steal<py::object>(reinterpret_cast<PyObject*>(heap_type));
+  result.attr("__module__") = "torch._C";
+  registerOpaqueBasePybindTypeInfo(type);
+  return result;
+}
+
+void installOpaqueBase(PyObject* module) {
+  auto py_module = py::reinterpret_borrow<py::module>(module);
+  auto pybind_opaque_base = createOpaqueBasePybindType();
+  py_module.attr("_OpaqueBase") = pybind_opaque_base;
+  auto opaque_base_module = py::module_::import("torch._opaque_base");
+  opaque_base_module.attr("_install_opaque_base")(pybind_opaque_base);
+}
+
+} // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -694,7 +808,7 @@ static PyObject* THPModule_torchDeviceToDLDevice(
 }
 
 struct TorchDLPackExchangeAPI : public DLPackExchangeAPI {
-  TorchDLPackExchangeAPI() {
+  TorchDLPackExchangeAPI() : DLPackExchangeAPI{} {
     header.version.major = DLPACK_MAJOR_VERSION;
     header.version.minor = DLPACK_MINOR_VERSION;
     header.prev_api = nullptr;
@@ -705,7 +819,7 @@ struct TorchDLPackExchangeAPI : public DLPackExchangeAPI {
     current_work_stream = CurrentWorkStream;
   }
 
-  static const DLPackExchangeAPI* Global() {
+  static DLPackExchangeAPI* Global() {
     static TorchDLPackExchangeAPI inst;
     return &inst;
   }
@@ -764,11 +878,13 @@ struct TorchDLPackExchangeAPI : public DLPackExchangeAPI {
     try {
       at::IntArrayRef shape(
           prototype->shape, prototype->shape + prototype->ndim);
+      const auto device_index = c10::checked_convert<c10::DeviceIndex>(
+          prototype->device.device_id, "c10::DeviceIndex");
       at::TensorOptions options =
           at::TensorOptions()
               .dtype(at::toScalarType(prototype->dtype))
               .device(at::dlDeviceToTorchDevice(
-                  prototype->device.device_type, prototype->device.device_id));
+                  prototype->device.device_type, device_index));
       at::Tensor tensor = at::empty(shape, options);
       *out = at::toDLPackVersioned(tensor);
       return 0;
@@ -790,8 +906,10 @@ struct TorchDLPackExchangeAPI : public DLPackExchangeAPI {
         return 0;
       }
       if (at::torchDeviceToDLDevice(*acc_type).device_type == device_type) {
+        const auto device_index = c10::checked_convert<c10::DeviceIndex>(
+            device_id, "c10::DeviceIndex");
         *out_stream =
-            at::accelerator::getCurrentStream(device_id).native_handle();
+            at::accelerator::getCurrentStream(device_index).native_handle();
       }
       return 0;
     } catch (const std::exception& e) {
@@ -806,9 +924,7 @@ static PyObject* THPModule_DLPackExchangeAPI(
     PyObject* noargs) {
   HANDLE_TH_ERRORS
   return PyCapsule_New(
-      const_cast<DLPackExchangeAPI*>(TorchDLPackExchangeAPI::Global()),
-      "dlpack_exchange_api",
-      nullptr);
+      TorchDLPackExchangeAPI::Global(), "dlpack_exchange_api", nullptr);
   END_HANDLE_TH_ERRORS
 }
 
@@ -2312,6 +2428,7 @@ class WeakTensorRef {
   c10::weak_intrusive_ptr<c10::TensorImpl> weakref_;
 
  public:
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
   WeakTensorRef(const at::Tensor& t) : weakref_(t.getIntrusivePtr()) {}
 
   bool expired() {
@@ -2455,6 +2572,7 @@ PyObject* initModule() {
   ASSERT_TRUE(THPVariable_initModule(module));
   ASSERT_TRUE(THPFunction_initModule(module));
   ASSERT_TRUE(THPEngine_initModule(module));
+  installOpaqueBase(module);
   // NOTE: We need to be able to access OperatorExportTypes from ONNX for use in
   // the export side of JIT, so this ONNX init needs to appear before the JIT
   // init.
@@ -2660,7 +2778,7 @@ Call this whenever a new thread is created in order to propagate values from
   });
 
   py::class_<WeakTensorRef>(py_module, "_WeakTensorRef")
-      .def(py::init([](py::object tensor) {
+      .def(py::init([](const py::object& tensor) {
         return WeakTensorRef(THPVariable_Unpack(tensor.ptr()));
       }))
       .def("expired", &WeakTensorRef::expired);
@@ -2700,7 +2818,7 @@ Call this whenever a new thread is created in order to propagate values from
          at::SymIntArrayRef dilation_,
          bool transposed_,
          at::SymIntArrayRef output_padding_,
-         c10::SymInt groups_) {
+         const c10::SymInt& groups_) {
         return at::native::select_conv_backend(
             input,
             weight,
@@ -2710,7 +2828,7 @@ Call this whenever a new thread is created in order to propagate values from
             dilation_,
             transposed_,
             output_padding_,
-            std::move(groups_),
+            groups_,
             std::nullopt);
       },
       py::arg("input"),
@@ -2734,7 +2852,7 @@ Call this whenever a new thread is created in order to propagate values from
          at::SymIntArrayRef dilation_,
          bool transposed_,
          at::SymIntArrayRef output_padding_,
-         c10::SymInt groups_,
+         const c10::SymInt& groups_,
          std::optional<std::vector<c10::SymInt>> bias_sizes_opt) {
         c10::OptionalArrayRef<c10::SymInt> ref = std::nullopt;
         if (bias_sizes_opt) {
@@ -2749,7 +2867,7 @@ Call this whenever a new thread is created in order to propagate values from
             dilation_,
             transposed_,
             output_padding_,
-            std::move(groups_),
+            groups_,
             ref);
       },
       py::arg("input"),
