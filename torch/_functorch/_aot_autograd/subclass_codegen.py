@@ -7,10 +7,12 @@ a straight-line function where all metadata (indices, attr names,
 subclass types, symint positions) is baked in at compile time.
 """
 
+import contextlib
 import functools
 import keyword
 import logging
-from collections.abc import Callable, Iterable
+import threading
+from collections.abc import Callable, Iterable, Iterator
 from typing import cast, TYPE_CHECKING
 
 import torch
@@ -24,6 +26,76 @@ log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from torch.distributed._functional_collectives import AsyncCollectiveTensor
+
+
+# Optional sink for the source of every runtime-wrapper function codegen'd via
+# ``_compile_and_exec_source``. When a sink is installed (see
+# ``capture_generated_sources``), each codegen'd wrapper appends a
+# ``GeneratedSource`` to it; this lets AOT-to-Python lowering compose the wrappers
+# into one standalone module. Thread-local (NOT a process global) so a concurrent
+# compile on another thread cannot splice its wrappers into this capture; absent
+# (zero overhead, no behavior change) during ordinary compilation. Mirrors the
+# threading.local used by _saved_tensor_hook_context in graph_compile.py.
+_capture_tls = threading.local()
+
+
+def _current_capture_sink() -> "list[GeneratedSource] | None":
+    return getattr(_capture_tls, "sink", None)
+
+
+class GeneratedSource:
+    """One codegen'd runtime-wrapper function: its source, the exec'd function
+    object, and the globals it closes over (which include the inner ``compiled_fn``
+    it chains to, plus any baked metadata). The function object lets a composer wire
+    cross-wrapper references by identity. Recorded by ``_compile_and_exec_source``
+    when capture is active.
+
+    ``globals_dict`` is a PRE-EXEC snapshot of the declared closure globals: it does
+    NOT contain the interpreter ``__builtins__`` that exec() would otherwise inject,
+    so the standalone composer can reconstruct every entry as source without having
+    to special-case ``__builtins__``."""
+
+    def __init__(
+        self,
+        artifact_name: str,
+        fn_name: str,
+        source: str,
+        globals_dict: dict[str, object],
+        fn: object,
+        origin_id: int | None = None,
+    ) -> None:
+        self.artifact_name = artifact_name
+        self.fn_name = fn_name
+        self.source = source
+        self.globals_dict = globals_dict
+        self.fn = fn
+        # Identity of the TracingContext this wrapper was codegen'd under. The capture
+        # sink is duration-scoped over one inductor compile, so a re-entrant on-thread
+        # AOTAutograd lowering inside that window would append its wrappers too; the
+        # composer filters by this id to keep only the target graph's wrappers.
+        self.origin_id = origin_id
+
+
+@contextlib.contextmanager
+def capture_generated_sources(into: "list[GeneratedSource]") -> "Iterator[None]":
+    """Within this context, record every codegen'd runtime-wrapper function's source
+    into ``into`` (in codegen order). A no-op when not entered.
+
+    LOAD-BEARING THREADING INVARIANT: the sink is thread-local, so every wrapper that
+    must be captured into ``into`` has to be codegen'd ON THIS SAME THREAD. The owning
+    thread id is recorded here and checked in ``_compile_and_exec_source`` so that a
+    future change offloading wrapper codegen to a worker thread fails loudly (it would
+    otherwise see no sink, silently capture nothing, and yield an incomplete module).
+    """
+    prev = getattr(_capture_tls, "sink", None)
+    prev_owner = getattr(_capture_tls, "sink_owner_thread", None)
+    _capture_tls.sink = into
+    _capture_tls.sink_owner_thread = threading.get_ident()
+    try:
+        yield
+    finally:
+        _capture_tls.sink = prev
+        _capture_tls.sink_owner_thread = prev_owner
 
 
 def _is_symint_placeholder(x: None | int | SymInt) -> bool:
@@ -470,10 +542,43 @@ def _compile_and_exec_source(
     # no tracing is active. A real path makes them skip automatically.
     code = compile(source, f"{__file__}:codegen({artifact_name})", "exec")
     local_dict: dict[str, object] = {}
+    # exec() mutates ``globals_dict`` in place, injecting ``__builtins__`` (and any
+    # name the source binds at module scope). When capturing, snapshot the declared
+    # closed-over names BEFORE that happens so the captured GeneratedSource holds only
+    # the intended closure globals -- not the post-exec dict with the interpreter's
+    # ``__builtins__`` -- which is what the standalone composer reconstructs as source.
+    sink = _current_capture_sink()
+    captured_globals = dict(globals_dict) if sink is not None else globals_dict
     exec(code, globals_dict, local_dict)
     fn = local_dict[fn_name]
     if wrapped_fn is not None:
         functools.update_wrapper(fn, wrapped_fn)  # type: ignore[arg-type]
+
+    if sink is not None:
+        # LOAD-BEARING: the sink is thread-local, so this codegen MUST run on the
+        # thread that installed it (see capture_generated_sources). We only reach this
+        # branch because ``_current_capture_sink()`` saw a sink on THIS thread; a future
+        # change that offloads wrapper codegen to a worker thread would observe no sink
+        # there, silently capture nothing, and emit an incomplete standalone module.
+        # Assert thread identity here so such a refactor is forced to revisit capture.
+        owner = getattr(_capture_tls, "sink_owner_thread", None)
+        if owner is not None and owner != threading.get_ident():
+            raise RuntimeError(
+                "runtime-wrapper codegen ran off the capture-owning thread; the capture "
+                "sink is thread-local and would miss this wrapper (see "
+                "capture_generated_sources)"
+            )
+        # Tag with the current TracingContext identity so the composer can drop any
+        # wrapper a re-entrant lowering appended during the capture window (see the
+        # origin_id note on GeneratedSource).
+        ctx = torch._guards.TracingContext.try_get()
+        origin_id = id(ctx) if ctx is not None else None
+        sink.append(
+            GeneratedSource(
+                artifact_name, fn_name, source, captured_globals, fn, origin_id
+            )
+        )
+
     return fn  # type: ignore[return-value]
 
 
