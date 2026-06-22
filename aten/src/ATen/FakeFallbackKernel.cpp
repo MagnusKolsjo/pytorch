@@ -583,6 +583,51 @@ void maybe_run_unsafe_fallback(
       });
 }
 
+// Mirrors contains_tensor_types in fake_impls.py.
+bool type_contains_tensor(const c10::TypePtr& type) {
+  if (type->isSubtypeOf(*c10::TensorType::get())) {
+    return true;
+  }
+  for (const auto& contained : type->containedTypes()) {
+    if (type_contains_tensor(contained)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Mirrors _is_tensor_constructor in fake_impls.py: no tensor inputs and a
+// single tensor output.
+bool is_tensor_constructor(const c10::FunctionSchema& schema) {
+  for (const auto& arg : schema.arguments()) {
+    if (type_contains_tensor(arg.type())) {
+      return false;
+    }
+  }
+  return schema.returns().size() == 1 &&
+      schema.returns()[0].type()->kind() == c10::TypeKind::TensorType;
+}
+
+bool may_have_op_impl(
+    const c10::OperatorHandle& op,
+    const c10::FunctionSchema& schema,
+    const std::string& op_key,
+    const std::shared_ptr<c10::FakeTensorMode>& mode) {
+  if (mode && mode->op_impl_ops_.count(op_key)) {
+    return true;
+  }
+  if (op.hasTag(at::Tag::dynamic_output_shape) ||
+      op.hasTag(at::Tag::data_dependent_output)) {
+    return true;
+  }
+  if (is_tensor_constructor(schema)) {
+    return true;
+  }
+  const auto& name = op.operator_name().name;
+  return name.rfind("aten::_foreach_", 0) == 0 &&
+      op.hasKernelForDispatchKey(c10::DispatchKey::Meta);
+}
+
 void fakeFallback(
     const c10::OperatorHandle& op,
     c10::DispatchKeySet /*dispatchKeySet*/,
@@ -955,7 +1000,7 @@ void fakeFallback(
         stack, arguments_begin, num_arguments, schema, /*rewrite_to_meta=*/false);
   }
 
-  if (mode && interp) {
+  if (mode && interp && may_have_op_impl(op, schema, fake_op_key(), mode)) {
     bool op_impl_handled = (*interp)->fake_try_op_impl(
         op, stack, common_device.value_or(c10::Device(c10::DeviceType::CPU)));
     checkpoint(PHASE_OP_IMPL);

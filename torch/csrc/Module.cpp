@@ -3240,6 +3240,9 @@ Call this whenever a new thread is created in order to propagate values from
         for (auto k : keys[1]) {
           mode->prim_meta_ops_.insert(k.cast<std::string>());
         }
+        for (auto k : keys[2]) {
+          mode->op_impl_ops_.insert(k.cast<std::string>());
+        }
 
         // Store the Python CppFakeTensorMode object on the mode so op_impl
         // handlers (PyInterpreter.cpp) and _get_active_cpp_fake_tensor_mode

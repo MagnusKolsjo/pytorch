@@ -221,8 +221,11 @@ def _fake_dispatch_op_key(op: OpOverload) -> str:
     return op._name
 
 
-def _cpp_fake_dispatch_op_keys() -> tuple[list[str], list[str]]:
-    """get decomp table + prims keys
+def _cpp_fake_dispatch_op_keys() -> tuple[list[str], list[str], list[str]]:
+    """get decomp table + prims keys + op_impl dict keys
+
+    The op_impl keys cover only the exact-identity (dict) tier of
+    op_implementations_checks.
     """
     from torch._decomp import decomposition_table, meta_table
 
@@ -240,7 +243,13 @@ def _cpp_fake_dispatch_op_keys() -> tuple[list[str], list[str]]:
             if hasattr(op, "prim_meta_impl"):
                 prim_meta_keys.append(_fake_dispatch_op_key(op))
 
-    return decomp_keys, prim_meta_keys
+    op_impl_keys = [
+        _fake_dispatch_op_key(op)
+        for op in op_implementations_dict
+        if isinstance(op, OpOverload)
+    ]
+
+    return decomp_keys, prim_meta_keys, op_impl_keys
 
 
 @register_op_impl(op_implementations_dict.__contains__)

@@ -257,6 +257,7 @@ struct C10_API FakeTensorMode {
   // for ops that have no registration. See _cpp_fake_dispatch_op_keys.
   std::unordered_set<std::string> decomp_ops_;
   std::unordered_set<std::string> prim_meta_ops_;
+  std::unordered_set<std::string> op_impl_ops_;
 
   FakeTensorMode(
       std::shared_ptr<c10::SafePyObject> shape_env,
