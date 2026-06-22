@@ -4486,7 +4486,10 @@ class GraphModule(torch.nn.Module):
 Eq(s85 - 1, s64)
 Eq(s20, s64)
 Eq(s80 - 1, s77)
-Eq(s72, s71)""",
+Eq(s72, s71)
+Ne(s83, 1)
+Ne(s20, 1)
+Eq(s0, 1)""",
                 )
             elif nt_view_name == "base_is_nt_False_leaf_False_False":
                 self.assertExpectedInline(
