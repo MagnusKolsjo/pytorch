@@ -57,7 +57,7 @@ from torch.testing._internal.inductor_utils import (
 from torch.testing._internal.triton_utils import requires_gpu_and_triton
 from torch.utils._dtype_abbrs import dtype_abbrs
 from torch.utils._python_dispatch import TorchDispatchMode
-from torch.utils._pytree import tree_map
+from torch.utils._pytree import tree_leaves, tree_map
 
 
 try:
@@ -1459,8 +1459,13 @@ class TestInductorOpInfo(TestCase):
 
                         # skip checking gradient on CPU for now
                         if device_type == GPU_TYPE:
+                            # Only check gradients if there are input tensors requiring gradients
+                            has_grad_inputs = any(
+                                getattr(x, "requires_grad", False)
+                                for x in tree_leaves((args, kwargs))
+                            )
                             adjusted_kwargs.update(
-                                check_gradient=requires_grad,
+                                check_gradient=requires_grad and has_grad_inputs,
                                 output_process_fn_grad=sample_input.output_process_fn_grad,
                             )
                         else:
