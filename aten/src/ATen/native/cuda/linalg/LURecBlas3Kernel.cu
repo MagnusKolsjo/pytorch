@@ -9,9 +9,9 @@
 
 /*
   The following file contains implementation for a batched LU-factorization with partial pivoting.
-  The approach is a recursive panel factorization with trailing matrix updates delegated to GEMMs.
-  NOTE: meant as a temporary kernel before/when cuCUSOLVER/cuBLAS catches up as means to
-  speed up the process of MAGMA deprecation while at least preserving (and even improving 1.5-2.5x)
+  The approach is a recursive panel factorization with trailing matrix updates delegated to GEMMs/TRSMs.
+  NOTE: meant as a temporary kernel before/when cuCUSOLVER/cuBLAS catches up (meant for very small matrices)
+  as means to speed up the process of MAGMA deprecation while at least preserving (and even improving 1.5-2.5x)
   performance for the user on batched inputs with shapes above 256.
 
   Based off:
