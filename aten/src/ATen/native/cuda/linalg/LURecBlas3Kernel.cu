@@ -7,6 +7,29 @@
 #include <c10/util/complex.h>
 #include <ATen/native/cuda/MiscUtils.h>
 
+/*
+  The following file contains implementation for a batched LU-factorization with partial pivoting.
+  The approach is a recursive panel factorization with trailing matrix updates delegated to GEMMs.
+  NOTE: meant as a temporary kernel before/when cuCUSOLVER/cuBLAS catches up as means to
+  speed up the process of MAGMA deprecation while at least preserving (and even improving 1.5-2.5x)
+  performance for the user on batched inputs with shapes above 256.
+
+  Based off:
+
+  @inproceedings{abdelfattah2019progressive,
+    title={Progressive optimization of batched LU factorization on GPUs},
+    author={Abdelfattah, Ahmad and Tomov, Stanimire and Dongarra, Jack},
+    booktitle={2019 IEEE High Performance Extreme Computing Conference (HPEC)},
+    pages={1--6},
+    year={2019},
+    organization={IEEE}
+  }
+
+  The MAGMA implementation launches fewer kernels, it binds SMs to columns ("fake" sm allocation),
+  but uses its own slower GEMMs. Faster GEMMs from cuBLAS is the key for this implementation's
+  performance.
+*/
+
 
 namespace at::native {
 
