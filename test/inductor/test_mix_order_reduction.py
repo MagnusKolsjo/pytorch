@@ -1264,6 +1264,108 @@ class NoMixOrderReductionTest(MixOrderReductionTest):
     pass
 
 
+class OverFusionSdpaAblationTest(TestBase):
+    """
+    Ablation test to isolate whether the precision failure in
+    test_max_reads_limits_fusion is caused by the SDPA path (XPU
+    OVERRIDEABLE/Flash backend) or by other kernels in the backward pass
+    (e.g. mix_order_reduction triton kernels for RMSNorm/MLP backward).
+
+    Run this on a build/environment where test_max_reads_limits_fusion fails
+    to determine the root cause:
+      - If test_max_reads_limits_fusion_sdpa_math passes  -> SDPA is the cause
+      - If test_max_reads_limits_fusion_sdpa_math also fails -> cause is elsewhere
+    """
+
+    @inductor_config.patch(
+        {
+            "triton.mix_order_reduction": True,
+            "triton.mix_order_reduction_max_reads": 10,
+            "force_disable_caches": True,
+        }
+    )
+    def test_max_reads_limits_fusion_sdpa_math(self):
+        """
+        Same as test_max_reads_limits_fusion but forces SDPA to use the MATH
+        backend, bypassing the XPU Flash Attention (OVERRIDEABLE) path entirely.
+
+        If this test passes where test_max_reads_limits_fusion fails, the root
+        cause of the precision failure is confirmed to be in the SDPA backward
+        path (SYCL TLA in _scaled_dot_product_fused_attention_overrideable_xpu),
+        not in the mix_order_reduction triton kernels.
+        """
+        if not HAS_GPU:
+            self.skipTest("requires GPU")
+
+        from torch.nn.attention import sdpa_kernel, SDPBackend
+
+        num_heads = 8
+        num_kv_heads = 4
+        dim = 512
+        head_dim = dim // num_heads
+
+        class Attention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.c_q = nn.Linear(dim, dim, bias=False)
+                self.c_k = nn.Linear(dim, num_kv_heads * head_dim, bias=False)
+                self.c_v = nn.Linear(dim, num_kv_heads * head_dim, bias=False)
+                self.proj = nn.Linear(dim, dim, bias=False)
+
+            def forward(self, x):
+                B, T, D = x.shape
+                q = self.c_q(x).reshape(B, T, num_heads, head_dim)
+                k = self.c_k(x).reshape(B, T, num_kv_heads, head_dim)
+                v = self.c_v(x).reshape(B, T, num_kv_heads, head_dim)
+                q = F.rms_norm(q, (q.size(-1),))
+                k = F.rms_norm(k, (k.size(-1),))
+                q = q.transpose(1, 2)
+                k = k.transpose(1, 2).repeat_interleave(
+                    num_heads // num_kv_heads, dim=1
+                )
+                v = v.transpose(1, 2).repeat_interleave(
+                    num_heads // num_kv_heads, dim=1
+                )
+                # Force MATH backend to bypass XPU Flash Attention (OVERRIDEABLE)
+                with sdpa_kernel(SDPBackend.MATH):
+                    y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+                return self.proj(y.transpose(1, 2).reshape(B, T, D))
+
+        class Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn_norm = nn.RMSNorm(dim)
+                self.mlp_norm = nn.RMSNorm(dim)
+                self.attn = Attention()
+                self.fc1 = nn.Linear(dim, dim * 4, bias=False)
+                self.fc2 = nn.Linear(dim * 4, dim, bias=False)
+
+            def forward(self, x):
+                x = x + self.attn(self.attn_norm(x))
+                h = self.mlp_norm(x)
+                x = x + self.fc2(F.leaky_relu(self.fc1(h), negative_slope=0.5).square())
+                return x
+
+        model = nn.Sequential(*[Block() for _ in range(3)]).to(GPU_TYPE).bfloat16()
+
+        x = torch.randn(
+            8, 2048, dim, device=GPU_TYPE, dtype=torch.bfloat16, requires_grad=True
+        )
+        dy = torch.randn_like(x)
+
+        out_ref = model(x)
+        out_ref.backward(dy)
+        grad_ref = x.grad.clone()
+        x.grad = None
+
+        compiled = torch.compile(model, dynamic=False, fullgraph=True)
+        out_act = compiled(x)
+        out_act.backward(dy)
+        grad_act = x.grad.clone()
+
+        self.assertTrue(same(grad_ref, grad_act, tol=5e-2))
+
+
 if __name__ == "__main__":
     if HAS_GPU:
         run_tests()
