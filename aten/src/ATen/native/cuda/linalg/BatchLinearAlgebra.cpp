@@ -864,7 +864,10 @@ static void lu_factor_batched_magma(const Tensor& input, const Tensor& pivots, c
 #ifdef USE_LINALG_SOLVER
 enum class SolverBackend : char {
   CUSOLVER,
-  CUBLAS
+  CUBLAS,
+  // a temporary backend for custom kernels before/when cuSOLVER/cuBLAS catches up with MAGMA,
+  // these are mostly batched cases (>= 4) of shapes above 256.
+  CUSTOM
 };
 #ifndef USE_ROCM
 namespace {
@@ -903,7 +906,13 @@ namespace {
   // NOTE: additionally validated on Blackwell CUDA 13.2 with FP64 emulation
   // on/off for cuSOLVER (on by default for cuBLAS).
   // No severe mispredictions observed.
-  inline SolverBackend get_lu_factor_solver_backend(int64_t batch, int64_t m, int64_t n, const ScalarType& dtype) {
+  inline SolverBackend get_lu_factor_solver_backend(int64_t batch, int64_t m, int64_t n, const ScalarType& dtype, bool compute_pivots = true) {
+    // Select a custom pivoted LU factorization kernel over cuSOLVER/cuBLAS.
+    // The kernel is benchmarked on/tuned for A100, H100, L40S, GB200.
+    if (compute_pivots && (m == n) && batch >= 4 && m >= 256) {
+      return SolverBackend::CUSTOM;
+    }
+
     // cuBLAS does not support rectangular inputs.
     if (m != n) {
       return SolverBackend::CUSOLVER;
@@ -980,16 +989,17 @@ static void lu_factor(const Tensor& input, const Tensor& pivots, const Tensor& i
       lu_factor_batched_cublas(input, pivots, infos, compute_pivots);
     }
 #else
-    if (batch_size >= 1 && compute_pivots) {
-      std::cout << "calling my kernel" << std::endl;
-      ::at::native::lu_batched_blas3_kernel(input, pivots, infos);
-      return;
-    }
-    const auto solver_backend = get_lu_factor_solver_backend(batch_size, m, n, input.scalar_type());
-    if (solver_backend == SolverBackend::CUSOLVER) {
-      lu_factor_looped_cusolver(input, pivots, infos, compute_pivots);
-    } else {
-      lu_factor_batched_cublas(input, pivots, infos, compute_pivots);
+    const auto solver_backend = get_lu_factor_solver_backend(batch_size, m, n, input.scalar_type(), compute_pivots);
+    switch (solver_backend) {
+      case SolverBackend::CUSOLVER:
+        lu_factor_looped_cusolver(input, pivots, infos, compute_pivots);
+        break;
+      case SolverBackend::CUBLAS:
+        lu_factor_batched_cublas(input, pivots, infos, compute_pivots);
+        break;
+      case SolverBackend::CUSTOM:
+        ::at::native::lu_batched_blas3_kernel(input, pivots, infos);
+        break;
     }
 #endif
   };
