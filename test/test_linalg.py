@@ -5641,9 +5641,10 @@ class TestLinalg(TestCase):
     @dtypes(*floating_and_complex_types())
     def test_linalg_batched_lu_stability_large_inputs(self, device, dtype):
         # Check whether LU factorization is stable.
-        # We use the criterion from Netlib:
+        # We use the criterion from Netlib/MAGMA:
         # scaled_residul < K, where
-        # scaled_residual = ||PLU - A||_1 / (||A||_1 * n * eps)
+        # scaled_residual = ||PLU - A|| / (||A|| * n * eps)
+        # Netlib uses 1-norm, while MAGMA uses Frobenius norm.
         if dtype in (torch.float, torch.double):
             compute_dtype = torch.double
         else:
@@ -5665,11 +5666,19 @@ class TestLinalg(TestCase):
 
             # Compute scaled residual as per Netlib
             # ||PLU - A||_1 / (||A||_1 * n * eps)
-            scaled_residual = norm(P @ L @ U - A)
             scale = norm(A).mul_(n * eps)
             scaled_residual = norm(P @ L @ U - A).div_(scale)
 
-            # Very conservative - Netlib uses 30
+            # Very conservative - Netlib uses 30, and so is MAGMA, see:
+            #
+            # Netlib:
+            # https://github.com/Reference-LAPACK/lapack/blob/master/TESTING/LIN/dget01.f
+            # https://github.com/Reference-LAPACK/lapack/blob/master/TESTING/LIN/dchkge.f
+            # https://github.com/Reference-LAPACK/lapack/blob/master/TESTING/dtest.in
+            #
+            # MAGMA:
+            # https://github.com/icl-utk-edu/magma/blob/master/testing/testing_zgetrf.cpp
+            # https://github.com/icl-utk-edu/magma/blob/master/testing/magma_util.cpp
             K = 1.0
             self.assertTrue((scaled_residual < K).all())
 
