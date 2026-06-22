@@ -122,7 +122,7 @@ jobs:
       # Pinned .ci/docker tree (git rev-parse <ref>:.ci/docker). Resolves to the same ECR tag as
       # pytorch-linux-noble-rocm-nightly-py3-gfx950-<hash>. Bump when gfx950 Dockerfiles change.
       docker-image-name: ci-image:pytorch-linux-noble-rocm-nightly-py3-gfx950
-      ci-docker-hash: 86f7face98a79f30f65e8ceccf5edebefc56a56b
+      # ci-docker-hash: 86f7face98a79f30f65e8ceccf5edebefc56a56b
       test-matrix: |
         { include: [
           { config: "operator_microbenchmark_test", shard: 1, num_shards: 1, runner: "linux.rocm.gpu.gfx950.1" },
