@@ -3054,13 +3054,12 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
             from ..exc import raise_observed_exception
 
             raise_observed_exception(AttributeError, tx)
-            raise
 
         if isinstance(
             member, (torch._ops.OpOverloadPacket, torch._ops.OpOverload)
         ) and torch._dynamo.trace_rules.is_aten_op_or_tensor_method(member):
             return TorchInGraphFunctionVariable(member, source=source)
-        return variables.GetAttrVariable(self, name, source=source)
+        return VariableTracker.build(tx, member, source)
 
     def call_function(
         self,
