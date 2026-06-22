@@ -3128,6 +3128,18 @@ class TMACompatibilityChecker:
         return self.force
 
 
+def _may_use_xmask_unswitch(kernel: TritonKernel) -> bool:
+    """Whether xmask unswitch optimization may apply.
+
+    Config flag must be enabled and x-dimension numel must be dynamic.
+    Per-op eligibility (xmask is sole mask) is checked at load/store sites.
+    """
+    if not config.triton.xmask_unswitch:
+        return False
+    xtree = kernel.range_trees[0]
+    return not isinstance(xtree.numel, (sympy.Integer, int))
+
+
 class TritonKernel(SIMDKernel[TritonCSEVariable]):
     """A class to represent a triton kernel and helpers to generate
     triton kernel programmatically
@@ -3168,6 +3180,8 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         self.post_loop_store: IndentedBuffer = IndentedBuffer()
         self.outside_loop_vars = OrderedSet[Any]()
         self.min_elem_per_thread = min_elem_per_thread
+        # True after load()/store() observes an xmask-only memory op.
+        self._use_xmask_unswitch = False
         self.block_ptr_id = itertools.count()
         self.block_ptr_to_buffer = dict[str, str]()
         self.helper_functions = HelperFunctions()
@@ -3201,6 +3215,11 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
 
     def triton_tensor_ndim(self) -> int:
         return sum(int(tree.tensor_dim is not None) for tree in self.range_trees)
+
+    def _is_xmask_unswitchable_indexing(self, indexing: IndexingOptions) -> bool:
+        return _may_use_xmask_unswitch(self) and indexing.mask_vars == OrderedSet(
+            ["xmask"]
+        )
 
     def indexing_size_str(self, i: int) -> str:
         sizes = ["None"] * self.triton_tensor_ndim()
@@ -4337,6 +4356,9 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                 shape = ()
             else:
                 line = f"tl.load({var} + ({indexing.index_str}), {indexing.mask_str}{ep}{other}{cachemod})"
+                # Mark this kernel for xmask unswitch optimization.
+                if self._is_xmask_unswitchable_indexing(indexing):
+                    self._use_xmask_unswitch = True
 
                 # The block shape of tl.load depends on the indexing expression.
                 # Inferring shape solely from the mask may miss cases where the mask is constant.
@@ -4477,6 +4499,9 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                     value_shape = ", ".join(map(str, value.shape))
                     indexing_str += f".broadcast_to({value_shape})"
             line = f"tl.store({var} + ({indexing_str}), {value}, {indexing.mask_str})"
+            # Mark this kernel for xmask unswitch optimization.
+            if self._is_xmask_unswitchable_indexing(indexing):
+                self._use_xmask_unswitch = True
         elif mode == "atomic_add":
             self.atomic_add_found = True
             indexing_str = indexing.index_str
@@ -6057,10 +6082,7 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                 self.cse.invalidate(self.outside_loop_vars)
                 tree.cache_clear()
         else:
-            self.body.splice(self.indexing_code)
-            self.body.splice(self.loads)
-            self.body.splice(self.compute)
-            self.body.splice(self.stores)
+            self._codegen_body()
         self.body.splice(self.post_loop_combine)
         if self.cooperative_reduction and (
             self.post_loop_combine or self.post_loop_store
@@ -7008,6 +7030,34 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         if xtree.prefix != "x":
             raise AssertionError(f"expected xtree prefix 'x', got {xtree.prefix!r}")
         return self._has_constant_mask(xtree)
+
+    def _codegen_body(self) -> None:
+        """Splice indexing/loads/compute/stores into self.body."""
+
+        def splice_ld_compute_st() -> None:
+            self.body.splice(self.loads)
+            self.body.splice(self.compute)
+            self.body.splice(self.stores)
+
+        if self._use_xmask_unswitch:
+            xtree = self.range_trees[0]
+            if xtree.prefix != "x":
+                raise AssertionError(f"expected xtree prefix 'x', got {xtree.prefix!r}")
+
+            block_var = f"{xtree.prefix.upper()}BLOCK"
+            predicate = f"{xtree.prefix}offset + {block_var} <= {xtree.prefix}numel"
+
+            self.body.splice(self.indexing_code)
+            self.body.writeline(f"if {predicate}:")
+            with self.body.indent():
+                self.body.writeline(self.create_constant_mask(xtree))
+                splice_ld_compute_st()
+            self.body.writeline("else:")
+            with self.body.indent():
+                splice_ld_compute_st()
+        else:
+            self.body.splice(self.indexing_code)
+            splice_ld_compute_st()
 
     def filter_masks(self, mask_vars: OrderedSet[str]) -> None:
         for tree in self.range_trees:
