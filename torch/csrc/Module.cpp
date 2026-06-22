@@ -3180,8 +3180,10 @@ Call this whenever a new thread is created in order to propagate values from
 
         at::Tensor meta_tensor;
         {
-          c10::impl::ExcludeDispatchKeyGuard guard(
+
+          c10::impl::ExcludeDispatchKeyGuard exclude_fake(
               {c10::DispatchKeySet(c10::DispatchKey::Fake)});
+          c10::impl::IncludeDispatchKeyGuard include_meta(c10::DispatchKey::Meta);
           auto meta_obj = converter.attr("to_meta_tensor")(
               real,
               py::arg("shape_env") = shape_env,
