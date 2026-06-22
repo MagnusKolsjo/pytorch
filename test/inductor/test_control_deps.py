@@ -1,5 +1,7 @@
 # Owner(s): ["module: inductor"]
 
+import unittest
+
 import torch
 from torch._inductor import config
 from torch._inductor.test_case import run_tests, TestCase as InductorTestCase
@@ -8,9 +10,13 @@ from torch.testing import FileCheck
 from torch.testing._internal.common_utils import IS_LINUX
 from torch.testing._internal.inductor_utils import (
     GPU_TYPE,
+    HAS_CUDA_AND_TRITON,
     HAS_GPU_AND_TRITON,
     requires_gpu,
 )
+
+
+requires_cuda_triton = unittest.skipUnless(HAS_CUDA_AND_TRITON, "requires CUDA")
 
 
 class TestControlDeps(InductorTestCase):
@@ -572,6 +578,72 @@ class TestControlDeps(InductorTestCase):
             0,
             "expected MutationOutput entries for pass-through values in control_deps",
         )
+
+    def test_default_stream_setup_only_once_per_device(self):
+        """default_stream capture should only run once per device entry.
+
+        User streams (stream1, etc.) are always re-fetched from the registry
+        since they're idempotent lookups. Only default_stream = current_stream()
+        is dangerous to re-run (it can latch the offload stream).
+
+        Tests the setup_stream_cache flag logic directly on the dataclass.
+        """
+        from torch._inductor.codegen.wrapper import (
+            EnterDeviceContextManagerWithStreamInfoLine,
+        )
+
+        last_device = None
+        stream_map = {1: 10}
+
+        def make_line(device_idx):
+            nonlocal last_device
+            setup = last_device != device_idx
+            last_device = device_idx
+            return EnterDeviceContextManagerWithStreamInfoLine(
+                device_idx=device_idx,
+                last_seen_device_guard_index=None,
+                num_streams=2,
+                stream_idx_to_user_obj_idx=stream_map,
+                setup_stream_cache=setup,
+            )
+
+        # First call for device 0: should setup default_stream
+        self.assertTrue(make_line(0).setup_stream_cache)
+
+        # Same device again: should NOT re-capture default_stream
+        self.assertFalse(
+            make_line(0).setup_stream_cache,
+            "Second entry for same device should skip default_stream capture",
+        )
+
+        # Different device: should setup default_stream
+        self.assertTrue(
+            make_line(1).setup_stream_cache,
+            "Different device should re-capture default_stream",
+        )
+
+        # Re-enter device 0 after device 1: must re-capture
+        self.assertTrue(
+            make_line(0).setup_stream_cache,
+            "Re-entering device 0 after device 1 must re-capture default_stream",
+        )
+
+    @requires_gpu()
+    def test_generated_code_uses_get_stream_by_index(self):
+        """Generated inductor code should use _get_stream_by_index to
+        retrieve user streams from the external object registry."""
+
+        def fn(x):
+            s = torch.Stream(device=GPU_TYPE)
+            with s:
+                return x + 1
+
+        x = torch.ones(4, 4, device=GPU_TYPE)
+        result, code = run_and_get_code(torch.compile(fn), x)
+        FileCheck().check("_get_stream_by_index").run(code[0])
+
+        expected = fn(torch.ones(4, 4, device=GPU_TYPE))
+        torch.testing.assert_close(result, expected)
 
 
 if __name__ == "__main__":

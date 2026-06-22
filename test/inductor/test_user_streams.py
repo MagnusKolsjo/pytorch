@@ -200,7 +200,7 @@ class TestStreamCodegen(InductorTestCase):
 with torch.cuda._DeviceGuard(0):
     torch.cuda.set_device(0)
     default_stream = torch.cuda.current_stream()
-    stream1 = get_external_object_by_index(3)
+    stream1 = _get_stream_by_index(3)
     with stream1:
 """,
             ),
@@ -211,7 +211,7 @@ with torch.cuda._DeviceGuard(0):
 with torch.xpu._DeviceGuard(0):
     torch.xpu.set_device(0)
     default_stream = torch.xpu.current_stream()
-    stream1 = get_external_object_by_index(3)
+    stream1 = _get_stream_by_index(3)
     with stream1:
 """,
             ),
@@ -222,6 +222,7 @@ with torch.xpu._DeviceGuard(0):
                 graph = SimpleNamespace(
                     cpp_wrapper=False,
                     device_ops=device_ops,
+                    device_type=device,
                 )
 
                 code = IndentedBuffer()
@@ -351,7 +352,7 @@ class TestUserStreamCompile(InductorTestCase):
         torch.cuda.synchronize()
 
         self.assertEqual(actual, expected)
-        self.assertIn("stream1 = get_external_object_by_index", code)
+        self.assertIn("stream1 = _get_stream_by_index", code)
         self.assertIn("raw_stream1 = get_raw_stream(1)", code)
         self.assertNotRegex(code, r"(?m)^\s*stream1 = get_raw_stream\(1\)")
 
@@ -2105,7 +2106,7 @@ class TestStreamIdentity(InductorTestCase):
     """Verify that compiled code uses the user's original stream objects."""
 
     def test_single_stream_identity(self):
-        """Codegen should retrieve the user's stream via get_external_object_by_index."""
+        """Codegen should retrieve the user's stream via _get_stream_by_index."""
         from torch._inductor.utils import run_and_get_code
 
         user_stream = torch.cuda.Stream()
@@ -2118,7 +2119,7 @@ class TestStreamIdentity(InductorTestCase):
         result, (code,) = run_and_get_code(torch.compile(fn), x)
 
         self.assertEqual(result, fn(x))
-        self.assertIn("get_external_object_by_index", code)
+        self.assertIn("_get_stream_by_index", code)
         self.assertNotIn("torch.cuda.Stream(device=", code)
 
     def test_multiple_stream_identity(self):
@@ -2143,8 +2144,8 @@ class TestStreamIdentity(InductorTestCase):
         result, (code,) = run_and_get_code(torch.compile(fn), x)
 
         self.assertEqual(result, fn(x))
-        # Should have two distinct get_external_object_by_index calls
-        matches = re.findall(r"get_external_object_by_index\((\d+)\)", code)
+        # Should have two distinct _get_stream_by_index calls
+        matches = re.findall(r"_get_stream_by_index\((\d+)\)", code)
         self.assertEqual(len(matches), 2)
         self.assertNotEqual(matches[0], matches[1])
         self.assertNotIn("torch.cuda.Stream(device=", code)
