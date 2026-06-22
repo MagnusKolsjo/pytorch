@@ -122,6 +122,11 @@ def resolve_epilogue_arg_kinds(
     return epilogue_arg_kinds
 
 
+def quack_epilogue_arg(arg: torch.Tensor) -> torch.Tensor:
+    """Adapt logical epilogue tensors to QuACK's physical tensor ABI."""
+    return arg.to(torch.uint8) if arg.dtype is torch.bool else arg
+
+
 def split_epilogue_args(
     epilogue_args: tuple[torch.Tensor, ...],
     epilogue_arg_kinds: tuple[str, ...],
@@ -133,6 +138,7 @@ def split_epilogue_args(
     col_args = []
     tile_args = []
     for arg, kind in zip(epilogue_args, epilogue_arg_kinds):
+        arg = quack_epilogue_arg(arg)
         match kind:
             case "row":
                 row_args.append(arg)
