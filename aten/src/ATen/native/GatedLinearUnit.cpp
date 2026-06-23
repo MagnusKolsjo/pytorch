@@ -34,7 +34,9 @@ TORCH_META_FUNC(glu) (
   const int64_t selfSize = nIn / 2;
   Tensor firstHalf = self.narrow(wrap_dim, 0, selfSize);
   Tensor secondHalf = self.narrow(wrap_dim, selfSize, selfSize);
-  build_borrowing_binary_op(maybe_get_output(), firstHalf, secondHalf);
+  // NS: Using `build_borrowing_binary_op` results in invalid here
+  // As self halves must be owned by iterator
+  build_binary_op(maybe_get_output(), firstHalf, secondHalf);
 }
 } // namespace at::meta
 

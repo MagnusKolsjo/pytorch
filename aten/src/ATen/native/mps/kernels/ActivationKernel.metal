@@ -324,6 +324,70 @@ REGISTER_BINARY_OP(sigmoid_backward, bfloat, bfloat);
 REGISTER_BINARY_OP(sigmoid_backward, float2, float2);
 REGISTER_BINARY_OP(sigmoid_backward, half2, half2);
 
+struct glu_functor {
+  template <typename T>
+  inline T operator()(const T a, const T b) {
+    const float bf = float(b);
+    return static_cast<T>(float(a) / (1.0f + ::metal::precise::exp(-bf)));
+  }
+};
+
+REGISTER_BINARY_OP(glu, float, float);
+REGISTER_BINARY_OP(glu, half, half);
+REGISTER_BINARY_OP(glu, bfloat, bfloat);
+
+// Fused glu backward, mirroring the CUDA kernel: a single pass over the
+// halved iteration shape that reads both input halves (the second via a fixed
+// byte offset) and writes both grad halves, computing sigmoid internally.
+template <typename T>
+kernel void glu_backward(
+    device void* grad_input [[buffer(0)]],
+    constant void* input [[buffer(1)]],
+    constant void* grad_output [[buffer(2)]],
+    constant long* sizes [[buffer(3)]],
+    constant long* grad_input_strides [[buffer(4)]],
+    constant long* input_strides [[buffer(5)]],
+    constant long* grad_output_strides [[buffer(6)]],
+    constant long& grad_input_byte_offset [[buffer(7)]],
+    constant long& input_byte_offset [[buffer(8)]],
+    constant uint& ndim [[buffer(9)]],
+    uint tid [[thread_position_in_grid]]) {
+  long pos[max_ndim];
+  pos_from_thread_index(static_cast<long>(tid), pos, sizes, ndim);
+  const auto gI_offs = offset_from_coord(pos, grad_input_strides, ndim);
+  const auto I_offs = offset_from_coord(pos, input_strides, ndim);
+  const auto gO_offs = offset_from_coord(pos, grad_output_strides, ndim);
+
+  using op_T = opmath_t<T>;
+  const op_T a = val_at_offs<T>(input, I_offs);
+  const op_T b = val_at_offs<T>(input, I_offs + input_byte_offset);
+  const op_T gO = val_at_offs<T>(grad_output, gO_offs);
+  const op_T one = 1;
+  const op_T sig = one / (one + ::metal::precise::exp(-b));
+  ref_at_offs<T>(grad_input, gI_offs) = static_cast<T>(sig * gO);
+  ref_at_offs<T>(grad_input, gI_offs + grad_input_byte_offset) =
+      static_cast<T>((one - sig) * sig * gO * a);
+}
+
+#define REGISTER_GLU_BACKWARD_OP(DTYPE)                      \
+  template [[host_name("glu_backward_" #DTYPE)]] kernel void \
+  glu_backward<DTYPE>(                                       \
+      device void* grad_input [[buffer(0)]],                 \
+      constant void* input [[buffer(1)]],                    \
+      constant void* grad_output [[buffer(2)]],              \
+      constant long* sizes [[buffer(3)]],                    \
+      constant long* grad_input_strides [[buffer(4)]],       \
+      constant long* input_strides [[buffer(5)]],            \
+      constant long* grad_output_strides [[buffer(6)]],      \
+      constant long& grad_input_byte_offset [[buffer(7)]],   \
+      constant long& input_byte_offset [[buffer(8)]],        \
+      constant uint& ndim [[buffer(9)]],                     \
+      uint tid [[thread_position_in_grid]])
+
+REGISTER_GLU_BACKWARD_OP(float);
+REGISTER_GLU_BACKWARD_OP(half);
+REGISTER_GLU_BACKWARD_OP(bfloat);
+
 struct log_sigmoid_forward_functor {
   template <typename T>
   inline T operator()(const T self) {

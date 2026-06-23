@@ -11,6 +11,7 @@
 #include <ATen/ops/add.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_like.h>
+#include <ATen/ops/glu_backward_native.h>
 #include <ATen/ops/log_sigmoid_backward_native.h>
 #include <ATen/ops/log_sigmoid_forward_native.h>
 #include <ATen/ops/mul.h>
@@ -151,6 +152,73 @@ static void sigmoid_backward_kernel(TensorIteratorBase& iter) {
   lib.exec_binary_kernel(iter, "sigmoid_backward");
 }
 
+static void glu_kernel(TensorIteratorBase& iter) {
+  lib.exec_binary_kernel(iter, "glu");
+}
+
+// Dedicated MPS glu backward, following the CUDA implementation: build an
+// iterator over the halved shape and launch a single fused kernel that reaches
+// the second halves of input/grad_input through fixed byte offsets, rather than
+// reusing glu_backward_cpu_out (which computes sigmoid as a separate op).
+Tensor& glu_backward_mps_out(const Tensor& grad_output, const Tensor& input, int64_t dim, Tensor& grad_input) {
+  using namespace mps;
+  TORCH_CHECK(input.dim() > 0, "glu does not support 0-dimensional tensors");
+  const auto wrap_dim = maybe_wrap_dim(dim, input.dim());
+  const auto input_sizes = input.sizes();
+  const int64_t nIn = input_sizes[wrap_dim];
+  TORCH_CHECK(nIn % 2 == 0, "Halving dimension must be even, but dimension ", wrap_dim, " is size ", nIn);
+
+  grad_input.resize_(input_sizes);
+
+  DimVector iter_shape(input_sizes);
+  const auto dim_size = nIn / 2;
+  iter_shape[wrap_dim] = dim_size;
+  TORCH_CHECK(grad_output.sizes() == IntArrayRef{iter_shape});
+
+  auto iter = TensorIteratorConfig()
+                  .add_output(grad_input)
+                  .add_const_input(input)
+                  .add_const_input(grad_output)
+                  .resize_outputs(false)
+                  .declare_static_shape(iter_shape)
+                  .build();
+  if (iter.numel() == 0) {
+    return grad_input;
+  }
+
+  const auto I_byte_offset = input.strides()[wrap_dim] * dim_size * input.element_size();
+  const auto gI_byte_offset = grad_input.strides()[wrap_dim] * dim_size * grad_input.element_size();
+
+  // Capture by reference so the block keeps non-const access to the iterator.
+  TensorIteratorBase& iter_ref = iter;
+  auto mpsStream = getCurrentMPSStream();
+  dispatch_sync_with_rethrow(mpsStream->queue(), ^() {
+    @autoreleasepool {
+      auto computeEncoder = mpsStream->commandEncoder();
+      auto pso = lib.getPipelineStateForFunc(fmt::format("glu_backward_{}", scalarToMetalTypeString(input)));
+      getMPSProfiler().beginProfileKernel(pso, "glu_backward", {input, grad_output});
+      [computeEncoder setComputePipelineState:pso];
+      bind_iter_tensors(computeEncoder, iter_ref);
+      mtl_setArgs<3>(computeEncoder,
+                     iter_ref.shape(),
+                     iter_ref.strides(0),
+                     iter_ref.strides(1),
+                     iter_ref.strides(2),
+                     gI_byte_offset,
+                     I_byte_offset,
+                     static_cast<uint32_t>(iter_ref.ndim()));
+      mtl_dispatch1DJob(computeEncoder, pso, iter_ref.numel());
+      getMPSProfiler().endProfileKernel(pso);
+    }
+  });
+  return grad_input;
+}
+
+Tensor glu_backward_mps(const Tensor& grad_output, const Tensor& input, int64_t dim) {
+  auto grad_input = at::empty({0}, input.options());
+  return glu_backward_mps_out(grad_output, input, dim, grad_input);
+}
+
 std::tuple<Tensor&, Tensor&> log_sigmoid_forward_out_mps(const Tensor& self, Tensor& output, Tensor& buffer) {
   // NOTE: buffer is only used by CPU dispatch, we just ignore it here
   output.resize_as_(self);
@@ -206,5 +274,6 @@ REGISTER_DISPATCH(silu_backward_stub, silu_backward_kernel);
 REGISTER_DISPATCH(GeluKernel, gelu_kernel);
 REGISTER_DISPATCH(GeluBackwardKernel, gelu_backward_kernel);
 REGISTER_DISPATCH(sigmoid_backward_stub, sigmoid_backward_kernel);
+REGISTER_DISPATCH(glu_stub, glu_kernel);
 
 } // namespace at::native

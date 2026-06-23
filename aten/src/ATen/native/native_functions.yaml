@@ -12046,8 +12046,7 @@
   structured_inherits: TensorIteratorBase
   python_module: nn
   dispatch:
-    CPU, CUDA, XPU: glu_out
-    MPS: glu_out_mps
+    CPU, CUDA, MPS, XPU: glu_out
 
 - func: glu(Tensor self, int dim=-1) -> Tensor
   structured_delegate: glu.out
