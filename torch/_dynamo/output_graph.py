@@ -2894,8 +2894,6 @@ class OutputGraph(OutputGraphCommon):
             # placeholder layout that must not be reordered.
             if (
                 config.canonicalize_output_graph_node_order
-                and not self.export
-                and not torch.compiler.is_exporting()
                 and not torch._dynamo.compiled_autograd.in_compiled_autograd_region
             ):
                 _canonicalize_graph(self.graph)
