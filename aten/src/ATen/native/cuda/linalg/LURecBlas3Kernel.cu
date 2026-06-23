@@ -367,48 +367,12 @@ batched_panel_full_kernel(
 }
 
 template <typename scalar_t>
-void lu_batched_blas3_kernel_flat(
-  scalar_t* dA,
-  int64_t matrix_stride,
-  int lda,
-  int m,
-  int col_start,
-  int nb,
-  int* dipiv,
-  int ipiv_stride,
-  int* dinfo,
-  int batch_count,
-  const LUTuning& tuning
-) {
-  auto panel_end = col_start + nb;
-  if (panel_end <= col_start) return;
-
-  auto grid = dim3(1, 1, batch_count);
-  if ((m - col_start) > tuning.panel_threshold) {
-    batched_panel_full_kernel<scalar_t, 1024><<<grid, 1024, 0, at::cuda::getCurrentCUDAStream()>>>(
-      dA, matrix_stride, lda, m,
-      col_start, panel_end,
-      ipiv_stride, dipiv, dinfo
-    );
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-  } else {
-    batched_panel_full_kernel<scalar_t, 256><<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-      dA, matrix_stride, lda, m,
-      col_start, panel_end,
-      ipiv_stride, dipiv, dinfo
-    );
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-  }
-}
-
-template <typename scalar_t>
 void lu_batched_panel_recursive(
   cublasHandle_t handle,
   scalar_t* dA,
   int64_t matrix_stride,
   int lda,
   int m,
-  int n,
   int col_start,
   int nb,
   int* dipiv,
@@ -422,12 +386,22 @@ void lu_batched_panel_recursive(
 
   // Base case: use flat panel factorization
   if (nb <= tuning.recnb) {
-    lu_batched_blas3_kernel_flat<scalar_t>(
-      dA, matrix_stride, lda, m,
-      col_start, nb,
-      dipiv, ipiv_stride, dinfo,
-      batch_count, tuning
-    );
+    auto grid = dim3(1, 1, batch_count);
+    auto panel_end = col_start + nb;
+    if ((m - col_start) > tuning.panel_threshold) {
+      batched_panel_full_kernel<scalar_t, 1024><<<grid, 1024, 0, at::cuda::getCurrentCUDAStream()>>>(
+        dA, matrix_stride, lda, m,
+        col_start, panel_end,
+        ipiv_stride, dipiv, dinfo
+      );
+    } else {
+      batched_panel_full_kernel<scalar_t, 256><<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        dA, matrix_stride, lda, m,
+        col_start, panel_end,
+        ipiv_stride, dipiv, dinfo
+      );
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
   }
 
@@ -437,7 +411,7 @@ void lu_batched_panel_recursive(
   // 1. Factor left half: columns [col_start, col_start + n1)
   lu_batched_panel_recursive<scalar_t>(
     handle,
-    dA, matrix_stride, lda, m, n,
+    dA, matrix_stride, lda, m,
     col_start, n1,
     dipiv, ipiv_stride, dinfo,
     batch_count, ws, tuning
@@ -457,16 +431,16 @@ void lu_batched_panel_recursive(
     col_start, n1, n2, m - col_start - n1, batch_count
   );
 
-  // 5. Factor right half: columns [col_start + n1, col_start + nb)
+  // 4. Factor right half: columns [col_start + n1, col_start + nb)
   lu_batched_panel_recursive<scalar_t>(
     handle,
-    dA, matrix_stride, lda, m, n,
+    dA, matrix_stride, lda, m,
     col_start + n1, n2,
     dipiv, ipiv_stride, dinfo,
     batch_count, ws, tuning
   );
 
-  // 6. Apply right-half pivots back to left half columns [col_start, col_start + n1)
+  // 5. Apply right-half pivots back to left half columns [col_start, col_start + n1)
   batched_apply_pivots<scalar_t>(
     dA, matrix_stride, lda,
     col_start + n1, n2,
@@ -525,7 +499,7 @@ void lu_batched_blas3_kernel_impl(
     // anywhere in [j, m) into the panel.
     lu_batched_panel_recursive<scalar_t>(
       handle,
-      dA, matrix_stride, lda, m, n,
+      dA, matrix_stride, lda, m,
       j, actual_nb,
       dipiv, ipiv_stride, dinfo,
       batch_count, ws, tuning
