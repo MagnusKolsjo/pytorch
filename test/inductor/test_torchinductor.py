@@ -160,6 +160,7 @@ from torch.testing._internal.triton_utils import (
     requires_cuda_and_triton,
     requires_gpu_and_triton,
 )
+from torch.utils._triton import has_triton_reduction_ordering
 
 
 _T = TypeVar("_T")
@@ -18739,6 +18740,57 @@ if RUN_GPU:
                         kernels.append(val)
 
             return kernels
+
+        @skip_if_not_triton
+        @unittest.skipUnless(
+            has_triton_reduction_ordering(),
+            "requires a Triton build that exposes tl.ReductionOrdering",
+        )
+        @config.patch(
+            {"force_disable_caches": True, "triton.persistent_reductions": True}
+        )
+        def test_strict_numerics_sum(self):
+            import triton
+            import triton.language as tl
+
+            @triton.jit
+            def ref_kernel(X, Z, N: tl.constexpr, ORD: tl.constexpr):
+                row = tl.program_id(0)
+                offs = tl.arange(0, N)
+                z = tl.sum(tl.load(X + row * N + offs), axis=0, reduction_ordering=ORD)
+                tl.store(Z + row, z)
+
+            torch.manual_seed(0)
+            M, N = 8, 256  # small -> Inductor emits a persistent reduction (no loop)
+            x = torch.randn(M, N, device=GPU_TYPE)
+            ref = torch.empty(M, device=GPU_TYPE)
+            ref_kernel[(M,)](x, ref, N=N, ORD=tl.ReductionOrdering.INNER_TREE)
+
+            def fn(z):
+                return torch.sum(z, dim=1)
+
+            # Flag off: no kwarg emitted, and the default order differs from
+            # the canonical INNER_TREE result (proving the flag drives numerics).
+            torch._dynamo.reset()
+            with config.patch({"numerics": "default"}):
+                compiled = torch.compile(fn)
+                code_off = run_and_get_triton_code(compiled, x)
+                out_default = compiled(x)
+            self.assertNotIn("reduction_ordering", code_off)
+            self.assertFalse(torch.equal(out_default, ref))
+
+            # Flag on: kwarg emitted (constexpr-wrapped), kernel compiles, and the
+            # result is bitwise identical to the canonical INNER_TREE reduction.
+            torch._dynamo.reset()
+            with config.patch({"numerics": "strict"}):
+                compiled = torch.compile(fn)
+                code_on = run_and_get_triton_code(compiled, x)
+                out_inner_tree = compiled(x)
+            self.assertIn(
+                "reduction_ordering=tl.constexpr(tl.ReductionOrdering.INNER_TREE)",
+                code_on,
+            )
+            self.assertTrue(torch.equal(out_inner_tree, ref))
 
         # On Blackwell+, #179729 raised the split-reduction no-split threshold to 524288,
         # so the 256*256=65536-element reduction below no longer splits and produces 1 kernel

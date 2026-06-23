@@ -1017,6 +1017,14 @@ deterministic = os.getenv("TORCHINDUCTOR_DETERMINISTIC") == "1"
 # Batch-invariant mode: stable per-sample compiled kernel across batch sizes. Implies deterministic.
 batch_invariant = os.getenv("TORCHINDUCTOR_BATCH_INVARIANT") == "1"
 
+# Numerics mode. "strict" forces a deterministic, layout-independent reduction
+# order (INNER_TREE) for sums, making results bitwise-reproducible across Triton
+# configs. No-op on Triton builds without tl.ReductionOrdering.
+# pyrefly: ignore [bad-assignment]
+numerics: Literal["default", "strict"] = os.environ.get(
+    "TORCHINDUCTOR_NUMERICS", "default"
+)  # type: ignore[assignment]
+
 # When we do split reduction, this number control the minimum value for
 # num_split. Too small num_split make the split reduction less efficient.
 # It's a much bigger problem when we compile a dynamic shape kernel with

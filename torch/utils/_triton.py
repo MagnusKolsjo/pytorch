@@ -175,6 +175,24 @@ def has_triton_stable_tma_api() -> bool:
 
 
 @functools.cache
+def has_triton_reduction_ordering() -> bool:
+    """Whether the available Triton exposes tl.ReductionOrdering.
+
+    This controls deterministic, layout-independent reduction orderings
+    (e.g. tl.sum(..., reduction_ordering=tl.ReductionOrdering.INNER_TREE)).
+    Builds without the feature should not have the kwarg emitted into kernels.
+    """
+    if has_triton_package():
+        try:
+            from triton.language import ReductionOrdering  # noqa: F401
+
+            return True
+        except ImportError:
+            pass
+    return False
+
+
+@functools.cache
 def has_triton() -> bool:
     if not has_triton_package():
         return False

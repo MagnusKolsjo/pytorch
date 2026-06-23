@@ -39,6 +39,7 @@ from torch.utils._sympy.functions import (
 from torch.utils._triton import (
     get_triton_version,
     has_triton_package,
+    has_triton_reduction_ordering,
     has_triton_stable_tma_api,
 )
 
@@ -4755,8 +4756,20 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                     result = f"{value}[:,:,None]"  # (Y,X) to (Y,X,R=1)
                     shape = [*value.shape, 1]
             else:
+                reduction_ordering = ""
+                if (
+                    config.numerics == "strict"
+                    and reduction_type == "sum"
+                    and has_triton_reduction_ordering()
+                ):
+                    # Force a deterministic, layout-independent reduction order.
+                    reduction_ordering = (
+                        ", reduction_ordering="
+                        "tl.constexpr(tl.ReductionOrdering.INNER_TREE)"
+                    )
                 result, shape = self.reduction_resize_and_shape(  # type: ignore[assignment]
-                    f"{triton_reduction_fn}({value}, {dim})", value.shape
+                    f"{triton_reduction_fn}({value}, {dim}{reduction_ordering})",
+                    value.shape,
                 )
 
             if result_type is not None:
