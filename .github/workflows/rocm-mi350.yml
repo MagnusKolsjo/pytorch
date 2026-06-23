@@ -5,9 +5,11 @@
 name: rocm-mi350
 
 on:
-  #push:
-  #  tags:
-  #    - ciflow/rocm-mi350/*
+  # DEBUG: temporarily enabled to triage gfx950 CUDA-context poisoning in
+  # test_fake_tensor. DO NOT MERGE.
+  push:
+    tags:
+      - ciflow/rocm-mi350/*
   workflow_dispatch:
   #schedule:
   #  - cron: 29 8 * * *  # about 1:29am PDT
@@ -22,50 +24,24 @@ permissions:
   actions: read
 
 jobs:
-  target-determination:
+  # DEBUG: get-label-type (runner-determinator) and target-determination removed
+  # so a dispatch doesn't wait on GitHub-hosted ubuntu-latest. The runner is
+  # hardcoded to the amd-do gfx950 pool below, and tests-to-include makes
+  # target-determination unnecessary.
+  # DEBUG: no build job. The test downloads a prebuilt trunk wheel from S3 (see
+  # _rocm-test.yml "Download build artifacts"), so a dispatch is just the gfx950
+  # test job -- no compile, no build runner. DO NOT MERGE.
+  linux-noble-rocm-py3_12-test:
     if: github.repository_owner == 'pytorch'
-    name: before-test
-    uses: ./.github/workflows/target_determination.yml
-
-  get-label-type:
-    name: get-label-type
-    uses: pytorch/pytorch/.github/workflows/_runner-determinator.yml@main
-    if: ${{ (github.event_name != 'schedule' || github.repository == 'pytorch/pytorch') && github.repository_owner == 'pytorch' }}
+    name: linux-jammy-rocm-py3.10-mi350
+    uses: ./.github/workflows/_rocm-test.yml
     with:
-      triggering_actor: ${{ github.triggering_actor }}
-      issue_owner: ${{ github.event.pull_request.user.login || github.event.issue.user.login }}
-      curr_branch: ${{ github.head_ref || github.ref_name }}
-      curr_ref_type: ${{ github.ref_type }}
-      check_experiments: amd-do
-
-  linux-noble-rocm-py3_12-build:
-    if: ${{ (github.event_name != 'schedule' || github.repository == 'pytorch/pytorch') && github.repository_owner == 'pytorch' }}
-    name: linux-noble-rocm-py3.12-mi350
-    uses: ./.github/workflows/_linux-build.yml
-    needs: get-label-type
-    with:
-      runner_prefix: ""
-      build-environment: linux-noble-rocm-py3.12-mi350
-      docker-image-name: ci-image:pytorch-linux-noble-rocm-n-py3
+      build-environment: linux-jammy-rocm-py3.10-mi350
+      docker-image: ci-image:pytorch-linux-jammy-rocm-n-py3
       test-matrix: |
         { include: [
-          { config: "default", shard: 1, num_shards: 6, runner: "${{ needs.get-label-type.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "default", shard: 2, num_shards: 6, runner: "${{ needs.get-label-type.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "default", shard: 3, num_shards: 6, runner: "${{ needs.get-label-type.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "default", shard: 4, num_shards: 6, runner: "${{ needs.get-label-type.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "default", shard: 5, num_shards: 6, runner: "${{ needs.get-label-type.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "default", shard: 6, num_shards: 6, runner: "${{ needs.get-label-type.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
+          { config: "default", shard: 1, num_shards: 1, runner: "amd-do-linux.rocm.gpu.gfx950.1" },
         ]}
-    secrets: inherit
-
-  linux-noble-rocm-py3_12-test:
-    name: linux-noble-rocm-py3.12-mi350
-    uses: ./.github/workflows/_rocm-test.yml
-    needs:
-      - linux-noble-rocm-py3_12-build
-      - target-determination
-    with:
-      build-environment: ${{ needs.linux-noble-rocm-py3_12-build.outputs.build-environment }}
-      docker-image: ${{ needs.linux-noble-rocm-py3_12-build.outputs.docker-image }}
-      test-matrix: ${{ needs.linux-noble-rocm-py3_12-build.outputs.test-matrix }}
+      # DEBUG: only run the test file with the context-poisoning fault.
+      tests-to-include: "test_fake_tensor"
     secrets: inherit

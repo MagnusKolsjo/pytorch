@@ -139,9 +139,14 @@ jobs:
           echo "monitor-script-pid=${!}" >> "${GITHUB_OUTPUT}"
 
       - name: Download build artifacts
-        uses: ./.github/actions/download-build-artifacts
-        with:
-          name: ${{ inputs.build-environment }}
+        shell: bash
+        run: |
+          # DEBUG: pull a prebuilt trunk wheel (run 28050353108, sha ca983a765)
+          # from S3 instead of building. Public-read, no creds needed. DO NOT MERGE.
+          curl -sSL -o artifacts.zip \
+            "https://gha-artifacts.s3.amazonaws.com/pytorch/pytorch/28050353108/linux-jammy-rocm-py3.10-mi350/artifacts.zip"
+          unzip -o artifacts.zip
+          rm artifacts.zip
 
       - name: Download TD artifacts
         continue-on-error: true
@@ -254,6 +259,9 @@ jobs:
             -e TESTS_TO_INCLUDE \
             -e HUGGING_FACE_HUB_TOKEN \
             -e DASHBOARD_TAG \
+            -e AMD_SERIALIZE_KERNEL=3 \
+            -e TORCH_SHOW_CPP_STACKTRACES=1 \
+            -e PYTHONUNBUFFERED=1 \
             --env-file="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}" \
             --ulimit stack=10485760:83886080 \
             --ulimit core=0 \
