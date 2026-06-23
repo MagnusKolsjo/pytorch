@@ -2215,7 +2215,9 @@ class TritonOverrides(OpOverrides):
     def signbit(x):
         # XX: This is wrong for the value -0.0 in floating point
         return (
-            f"(libdevice.signbit({x}) != 0) if ({x}).dtype is tl.float32 else {x} < 0"
+            f"(libdevice.signbit({x}) != 0) "
+            f"if ({x}).dtype is tl.float32 or ({x}).dtype is tl.float64 "
+            f"else {x} < 0"
         )
 
     @staticmethod
