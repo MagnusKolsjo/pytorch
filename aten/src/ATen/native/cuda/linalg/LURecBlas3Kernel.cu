@@ -124,6 +124,63 @@ void build_trsm_ptrs_device(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// TRSM + GEMM trailing-matrix update.
+// Solves L11 \ A12 (TRSM), then updates A22 -= L21 @ U12 (GEMM).
+// All sub-blocks are relative to (diag_offset, diag_offset) on the diagonal:
+//   L11: panel_width x panel_width, unit lower triangular
+//   A12: panel_width x n_right (overwritten with U12)
+//   L21: m_below x panel_width
+//   A22: m_below x n_right
+template <typename scalar_t>
+void trailing_matrix_update(
+  cublasHandle_t handle,
+  scalar_t* dA,
+  int64_t matrix_stride,
+  LUWorkspace<scalar_t>& ws,
+  int lda,
+  int diag_offset,
+  int panel_width,
+  int n_right,
+  int m_below,
+  int batch_count
+) {
+  if (n_right <= 0) return;
+
+  build_trsm_ptrs_device<scalar_t>(
+    dA, matrix_stride, ws, lda,
+    diag_offset, panel_width
+  );
+
+  auto constexpr one = static_cast<scalar_t>(1);
+  auto constexpr neg_one = static_cast<scalar_t>(-1);
+  at::cuda::blas::trsmBatched<scalar_t>(
+    handle,
+    CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+    CUBLAS_OP_N, CUBLAS_DIAG_UNIT,
+    panel_width, n_right, &one,
+    ws.dL11_array, lda,
+    ws.dA12_array, lda,
+    batch_count
+  );
+
+  if (m_below > 0) {
+    size_t off_L21 = (diag_offset + panel_width) + static_cast<size_t>(diag_offset) * lda;
+    size_t off_U12 = diag_offset + static_cast<size_t>(diag_offset + panel_width) * lda;
+    size_t off_A22 = (diag_offset + panel_width) + static_cast<size_t>(diag_offset + panel_width) * lda;
+
+    at::cuda::blas::bgemm(
+      'n', 'n',
+      m_below, n_right, panel_width,
+      neg_one,
+      dA + off_L21, lda, matrix_stride,
+      dA + off_U12, lda, matrix_stride,
+      one,
+      dA + off_A22, lda, matrix_stride,
+      batch_count
+    );
+  }
+}
+
 // Argmax Abs helpers {
 template <typename real_t>
 __device__ __forceinline__ void warp_argmax(real_t& val, int& idx) {
@@ -204,7 +261,6 @@ void batched_apply_pivots(
   scalar_t* dA,
   int64_t matrix_stride,
   int lda,
-  int m,
   int col_start,
   int nb,
   const int* dipiv,
@@ -316,17 +372,15 @@ void lu_batched_blas3_kernel_flat(
   int64_t matrix_stride,
   int lda,
   int m,
-  int n,
   int col_start,
   int nb,
   int* dipiv,
   int ipiv_stride,
   int* dinfo,
   int batch_count,
-  LUWorkspace<scalar_t>& ws,
   const LUTuning& tuning
 ) {
-  auto panel_end = std::min(col_start + nb, n);
+  auto panel_end = col_start + nb;
   if (panel_end <= col_start) return;
 
   auto grid = dim3(1, 1, batch_count);
@@ -369,10 +423,10 @@ void lu_batched_panel_recursive(
   // Base case: use flat panel factorization
   if (nb <= tuning.recnb) {
     lu_batched_blas3_kernel_flat<scalar_t>(
-      dA, matrix_stride, lda, m, n,
+      dA, matrix_stride, lda, m,
       col_start, nb,
       dipiv, ipiv_stride, dinfo,
-      batch_count, ws, tuning
+      batch_count, tuning
     );
     return;
   }
@@ -391,49 +445,17 @@ void lu_batched_panel_recursive(
 
   // 2. Apply left-half pivots to right half columns [col_start + n1, col_start + nb)
   batched_apply_pivots<scalar_t>(
-    dA, matrix_stride, lda, m,
+    dA, matrix_stride, lda,
     col_start, n1,
     dipiv, ipiv_stride,
     col_start + n1, col_start + nb, batch_count
   );
 
-  // 3. TRSM: L11 \ A12
-  auto m_below = m - col_start - n1;
-
-  build_trsm_ptrs_device<scalar_t>(
-    dA, matrix_stride, ws, lda,
-    col_start, n1
+  // 3. TRSM + GEMM: trailing update
+  trailing_matrix_update<scalar_t>(
+    handle, dA, matrix_stride, ws, lda,
+    col_start, n1, n2, m - col_start - n1, batch_count
   );
-
-  auto constexpr one = static_cast<scalar_t>(1);
-  auto constexpr neg_one = static_cast<scalar_t>(-1);
-  at::cuda::blas::trsmBatched<scalar_t>(
-    handle,
-    CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
-    CUBLAS_OP_N, CUBLAS_DIAG_UNIT,
-    n1, n2, &one,
-    ws.dL11_array, lda,
-    ws.dA12_array, lda,
-    batch_count
-  );
-
-  // 4. GEMM: A22 -= L21 @ U12
-  if (m_below > 0) {
-    size_t off_L21 = (col_start + n1) + static_cast<size_t>(col_start) * lda;
-    size_t off_U12 = col_start + static_cast<size_t>(col_start + n1) * lda;
-    size_t off_A22 = (col_start + n1) + static_cast<size_t>(col_start + n1) * lda;
-
-    at::cuda::blas::bgemm(
-      'n', 'n',
-      m_below, n2, n1,
-      neg_one,
-      dA + off_L21, lda, matrix_stride,
-      dA + off_U12, lda, matrix_stride,
-      one,
-      dA + off_A22, lda, matrix_stride,
-      batch_count
-    );
-  }
 
   // 5. Factor right half: columns [col_start + n1, col_start + nb)
   lu_batched_panel_recursive<scalar_t>(
@@ -446,7 +468,7 @@ void lu_batched_panel_recursive(
 
   // 6. Apply right-half pivots back to left half columns [col_start, col_start + n1)
   batched_apply_pivots<scalar_t>(
-    dA, matrix_stride, lda, m,
+    dA, matrix_stride, lda,
     col_start + n1, n2,
     dipiv, ipiv_stride,
     col_start, col_start + n1, batch_count
@@ -514,13 +536,13 @@ void lu_batched_blas3_kernel_impl(
     // We must apply the same row swaps to the left columns [0, j) and
     // right columns [j + actual_nb, n) so the full row permutation is consistent.
     batched_apply_pivots<scalar_t>(
-      dA, matrix_stride, lda, m,
+      dA, matrix_stride, lda,
       j, actual_nb,
       dipiv, ipiv_stride,
       0, j, batch_count
     );
     batched_apply_pivots<scalar_t>(
-      dA, matrix_stride, lda, m,
+      dA, matrix_stride, lda,
       j, actual_nb,
       dipiv, ipiv_stride,
       j + actual_nb, n, batch_count
@@ -535,49 +557,10 @@ void lu_batched_blas3_kernel_impl(
     //
     // U12: solve L11 @ U12 = A[j:j + nb, j + nb:n] (TRSM)
     // A22: A22 -= L21 @ U12, updating the trailing (m - j - nb) x (n - j - nb) block.
-    auto n_right = n - j - actual_nb;
-    auto m_below = m - j - actual_nb;
-    if (n_right > 0) {
-      // L11 at (j, j): actual_nb x actual_nb, unit lower triangular
-      // A12 at (j, j + actual_nb): actual_nb x n_right - overwritten with U12
-      build_trsm_ptrs_device<scalar_t>(
-        dA, matrix_stride, ws, lda,
-        j, actual_nb
-      );
-
-      auto constexpr one = static_cast<scalar_t>(1);
-      auto constexpr neg_one = static_cast<scalar_t>(-1);
-      at::cuda::blas::trsmBatched<scalar_t>(
-        handle,
-        CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
-        CUBLAS_OP_N, CUBLAS_DIAG_UNIT,
-        actual_nb, n_right, &one,
-        ws.dL11_array, lda,
-        ws.dA12_array, lda,
-        batch_count
-      );
-
-      // 4. GEMM: A22 -= L21 @ U12
-      // L21 at (j + actual_nb, j): m_below x actual_nb
-      // U12 at (j, j + actual_nb): actual_nb x n_right (from TRSM above)
-      // A22 at (j + actual_nb, j + actual_nb): m_below x n_right
-      if (m_below > 0) {
-        size_t off_L21 = (j + actual_nb) + static_cast<size_t>(j) * lda;
-        size_t off_U12 = j + static_cast<size_t>(j + actual_nb) * lda;
-        size_t off_A22 = (j + actual_nb) + static_cast<size_t>(j + actual_nb) * lda;
-
-        at::cuda::blas::bgemm(
-          'n', 'n',
-          m_below, n_right, actual_nb,
-          neg_one,
-          dA + off_L21, lda, matrix_stride,
-          dA + off_U12, lda, matrix_stride,
-          one,
-          dA + off_A22, lda, matrix_stride,
-          batch_count
-        );
-      }
-    }
+    trailing_matrix_update<scalar_t>(
+      handle, dA, matrix_stride, ws, lda,
+      j, actual_nb, n - j - actual_nb, m - j - actual_nb, batch_count
+    );
   } // for j in range(0, min(m, n), nb)
 }
 
