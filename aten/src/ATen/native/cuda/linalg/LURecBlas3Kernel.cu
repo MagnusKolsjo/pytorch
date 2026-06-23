@@ -398,44 +398,41 @@ void lu_batched_panel_recursive(
 
   // 3. TRSM: L11 \ A12
   auto m_below = m - col_start - n1;
-  auto do_trailing_update = m_below && n1 && n2;
 
-  if (n1 && n2) {
-    build_trsm_ptrs_device<scalar_t>(
-      dA, matrix_stride, ws, lda,
-      col_start, col_start,
-      col_start, col_start + n1
-    );
+  build_trsm_ptrs_device<scalar_t>(
+    dA, matrix_stride, ws, lda,
+    col_start, col_start,
+    col_start, col_start + n1
+  );
 
-    auto constexpr one = static_cast<scalar_t>(1);
-    auto constexpr neg_one = static_cast<scalar_t>(-1);
-    at::cuda::blas::trsmBatched<scalar_t>(
-      handle,
-      CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
-      CUBLAS_OP_N, CUBLAS_DIAG_UNIT,
-      n1, n2, &one,
-      ws.dL11_array, lda,
-      ws.dA12_array, lda,
+  auto constexpr one = static_cast<scalar_t>(1);
+  auto constexpr neg_one = static_cast<scalar_t>(-1);
+  at::cuda::blas::trsmBatched<scalar_t>(
+    handle,
+    CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+    CUBLAS_OP_N, CUBLAS_DIAG_UNIT,
+    n1, n2, &one,
+    ws.dL11_array, lda,
+    ws.dA12_array, lda,
+    batch_count
+  );
+
+  // 4. GEMM: A22 -= L21 @ U12
+  if (m_below > 0) {
+    size_t off_L21 = (col_start + n1) + static_cast<size_t>(col_start) * lda;
+    size_t off_U12 = col_start + static_cast<size_t>(col_start + n1) * lda;
+    size_t off_A22 = (col_start + n1) + static_cast<size_t>(col_start + n1) * lda;
+
+    at::cuda::blas::bgemm(
+      'n', 'n',
+      m_below, n2, n1,
+      neg_one,
+      dA + off_L21, lda, matrix_stride,
+      dA + off_U12, lda, matrix_stride,
+      one,
+      dA + off_A22, lda, matrix_stride,
       batch_count
     );
-
-    // 4. GEMM: A22 -= L21 @ U12
-    if (do_trailing_update) {
-      size_t off_L21 = (col_start + n1) + static_cast<size_t>(col_start) * lda;
-      size_t off_U12 = col_start + static_cast<size_t>(col_start + n1) * lda;
-      size_t off_A22 = (col_start + n1) + static_cast<size_t>(col_start + n1) * lda;
-
-      at::cuda::blas::bgemm(
-        'n', 'n',
-        m_below, n2, n1,
-        neg_one,
-        dA + off_L21, lda, matrix_stride,
-        dA + off_U12, lda, matrix_stride,
-        one,
-        dA + off_A22, lda, matrix_stride,
-        batch_count
-      );
-    }
   }
 
   // 5. Factor right half: columns [col_start + n1, col_start + nb)
@@ -540,8 +537,7 @@ void lu_batched_blas3_kernel_impl(
     // A22: A22 -= L21 @ U12, updating the trailing (m - j - nb) x (n - j - nb) block.
     auto n_right = n - j - actual_nb;
     auto m_below = m - j - actual_nb;
-    auto do_trailing_update = n_right && m_below && actual_nb;
-    if (n_right && actual_nb) {
+    if (n_right > 0) {
       // L11 at (j, j): actual_nb x actual_nb, unit lower triangular
       // A12 at (j, j + actual_nb): actual_nb x n_right - overwritten with U12
       build_trsm_ptrs_device<scalar_t>(
@@ -563,10 +559,10 @@ void lu_batched_blas3_kernel_impl(
       );
 
       // 4. GEMM: A22 -= L21 @ U12
-      // L12 at (j + actual_nb, j): m_below x actual_nb
-      // U12 at (j, j + actual_nb): actula_nb x n_right (from TRSM above)
+      // L21 at (j + actual_nb, j): m_below x actual_nb
+      // U12 at (j, j + actual_nb): actual_nb x n_right (from TRSM above)
       // A22 at (j + actual_nb, j + actual_nb): m_below x n_right
-      if (do_trailing_update) {
+      if (m_below > 0) {
         size_t off_L21 = (j + actual_nb) + static_cast<size_t>(j) * lda;
         size_t off_U12 = j + static_cast<size_t>(j + actual_nb) * lda;
         size_t off_A22 = (j + actual_nb) + static_cast<size_t>(j + actual_nb) * lda;
