@@ -287,7 +287,7 @@ __global__ void __launch_bounds__(BS)
 batched_panel_full_kernel(
   scalar_t* __restrict__ dA, int64_t matrix_stride,
   int lda, int m,
-  int col_start, int panel_end,
+  int col_start, int nb,
   int ipiv_stride,
   int* __restrict__ dipiv,
   int* __restrict__ dinfo
@@ -302,7 +302,7 @@ batched_panel_full_kernel(
   int batch = blockIdx.z;
   auto* A = dA + batch * matrix_stride;
   int tid = threadIdx.x;
-  int ncols_panel = panel_end - col_start;
+  int panel_end = col_start + nb;
 
   for (int k = col_start; k < panel_end; ++k) {
     int rows_below = m - k - 1;
@@ -325,7 +325,7 @@ batched_panel_full_kernel(
 
     // 2. Row swaps
     if (pivot_row != k) {
-      for (int j = tid; j < ncols_panel; j += BS) {
+      for (int j = tid; j < nb; j += BS) {
         size_t idx1 = k + static_cast<size_t>(col_start + j) * lda;
         size_t idx2 = pivot_row + static_cast<size_t>(col_start + j) * lda;
         auto tmp = A[idx1];
@@ -387,17 +387,16 @@ void lu_batched_panel_recursive(
   // Base case: use flat panel factorization
   if (nb <= tuning.recnb) {
     auto grid = dim3(1, 1, batch_count);
-    auto panel_end = col_start + nb;
     if ((m - col_start) > tuning.panel_threshold) {
       batched_panel_full_kernel<scalar_t, 1024><<<grid, 1024, 0, at::cuda::getCurrentCUDAStream()>>>(
         dA, matrix_stride, lda, m,
-        col_start, panel_end,
+        col_start, nb,
         ipiv_stride, dipiv, dinfo
       );
     } else {
       batched_panel_full_kernel<scalar_t, 256><<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
         dA, matrix_stride, lda, m,
-        col_start, panel_end,
+        col_start, nb,
         ipiv_stride, dipiv, dinfo
       );
     }
