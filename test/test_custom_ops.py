@@ -621,6 +621,76 @@ class TestCustomOpTesting(CustomOpTestCaseBase):
 class TestCustomOp(CustomOpTestCaseBase):
     test_ns = "_test_custom_op"
 
+    def test_library_impl_does_not_enable_pyobject_dispatch_by_default(self):
+        lib = self.lib()
+        lib.define("pyobject_dispatch_composite(Tensor x) -> Tensor")
+
+        calls = []
+
+        def composite_impl(x):
+            calls.append("composite")
+            return x + 1
+
+        lib.impl(
+            "pyobject_dispatch_composite",
+            composite_impl,
+            "CompositeImplicitAutograd",
+        )
+
+        op = self.ns().pyobject_dispatch_composite.default
+        x = torch.ones(2)
+        self.assertFalse(op._is_pyobj_dispatcher_enabled())
+        self.assertEqual(op(x), x + 1)
+        self.assertTrue(calls)
+        self.assertTrue(all(call == "composite" for call in calls))
+
+    def test_pyobject_dispatch_custom_op_enabled_by_default(self):
+        calls = []
+
+        @torch.library.custom_op(
+            f"{self.test_ns}::pyobject_dispatch_custom_op", mutates_args=()
+        )
+        def f(x: Tensor) -> Tensor:
+            calls.append("custom")
+            return x + 1
+
+        op = self.ns().pyobject_dispatch_custom_op.default
+        self.assertTrue(op._is_pyobj_dispatcher_enabled())
+
+        x = torch.ones(2)
+        self.assertEqual(f(x), x + 1)
+        self.assertEqual(calls, ["custom"])
+
+    def test_pyobject_dispatch_normalizes_tensor_list_input(self):
+        @torch.library.custom_op(
+            f"{self.test_ns}::pyobject_dispatch_tensor_list", mutates_args=()
+        )
+        def f(xs: list[Tensor]) -> Tensor:
+            xs.append(torch.ones(()))
+            return xs[0].clone()
+
+        xs = [torch.zeros(())]
+        f(xs)
+        self.assertEqual(len(xs), 1)
+
+        op = self.ns().pyobject_dispatch_tensor_list.default
+        op._enable_pyobj_dispatch(False)
+        xs = [torch.zeros(())]
+        f(xs)
+        self.assertEqual(len(xs), 1)
+
+    def test_pyobject_dispatch_respects_torch_function_mode(self):
+        import torch._refs
+        from torch._prims.context import TorchRefsMode
+
+        op = torch.ops.prims.abs.default
+        self.assertTrue(op._is_pyobj_dispatcher_enabled())
+
+        x = torch.randn(2)
+        expected = x.abs()
+        with TorchRefsMode():
+            self.assertEqual(torch._refs.abs(x), expected)
+
     @requires_compile
     def test_functionalize_error(self):
         with torch.library._scoped_library(self.test_ns, "FRAGMENT") as lib:

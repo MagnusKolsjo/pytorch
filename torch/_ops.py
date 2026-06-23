@@ -7,6 +7,7 @@ import inspect
 import sys
 import types
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, ClassVar, Concatenate, final, Generic, TYPE_CHECKING
 from typing_extensions import ParamSpec, TypeVar
@@ -31,7 +32,6 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T", default=Any)
 _P = ParamSpec("_P", default=...)
-
 
 # Query `hasattr` only once.
 _SET_GLOBAL_FLAGS = hasattr(sys, "getdlopenflags") and hasattr(sys, "setdlopenflags")
@@ -802,6 +802,31 @@ def get_cached_ops():
     return cached_ops
 
 
+@dataclass
+class _PyObjectDispatcher:
+    # [NOTE: PyObject Dispatcher aka pyobj_dispatcher]
+    #
+    # Custom operators whose kernels are implemented in Python currently need
+    # to make 1+ roundtrips into the C++ PyTorch dispatcher. These roundtrips
+    # are expensive; the main expensive thing is converting a PyObject
+    # to an IValue requires copying the at::Tensor, incurring at::Tensor
+    # and PyObject (at::Tensor owns a PyObject) refcount bumps.
+    #
+    # Instead, we introduce a new type of dispatching, "PyObject Dispatching".
+    # When dispatching an operator, we avoid converting PyObject into IValues,
+    # instead doing the dispatch key computation in a reimplementation in the
+    # Python-C API. This dispatch is implemented faithfully compared to the
+    # C++ dispatcher and shares helper functions.
+    #
+    # After we have computed a DispatchKey to dispatch on, we query the C++
+    # Dispatcher for the kernel to be dispatched on. If the kernel is a Python
+    # kernel, then we directly pass the PyObject args to the Python kernel.
+    # if the kernel is a C++ kernel, then we perform a C++ Dispatcher redispatch
+    # (which ends up doing the expensive at::Tensor copies).
+    dispatch: Callable[..., Any]
+    redispatch: Callable[..., Any]
+
+
 # Each OpOverload object contains pointer to a specific operator overload, a pointer to the parent `OpOverloadPacket` object.
 # You can obtain an OpOverload object through attribute query on OpOverloadPacket.
 class OpOverload(OperatorBase, Generic[_P, _T]):
@@ -815,8 +840,10 @@ class OpOverload(OperatorBase, Generic[_P, _T]):
     ) -> None:
         super().__init__()
         self._op = op
+        self._cpp_dispatch_handle = op
         self._op_dk = op_dk
         self._schema = schema
+        self._pyobj_dispatcher: _PyObjectDispatcher | None = None
         self._overloadpacket = overloadpacket
         self._tags = tags
         self._overloadname = (
@@ -859,6 +886,7 @@ class OpOverload(OperatorBase, Generic[_P, _T]):
 
     @cached_property
     def _handle(self) -> torch._C._DispatchOperatorHandle:
+        # Handle to the C++ dispatcher operator entry, used for boxed dispatch.
         return torch._C._dispatch_find_schema_or_throw(
             self._schema.name, self._schema.overload_name
         )
@@ -880,10 +908,13 @@ class OpOverload(OperatorBase, Generic[_P, _T]):
     def redispatch(
         self, /, keyset: torch._C.DispatchKeySet, *args: _P.args, **kwargs: _P.kwargs
     ) -> _T:
+        pyobj_dispatcher = self._pyobj_dispatcher
+        if pyobj_dispatcher is not None:
+            return pyobj_dispatcher.redispatch(keyset, *args, **kwargs)
         return self._handle.redispatch_boxed(keyset, *args, **kwargs)  # type: ignore[return-value]
 
     def __hash__(self):
-        return hash(self._op)
+        return hash(self._cpp_dispatch_handle)
 
     # `my_namespace.my_op_name.overload_name`
     def __str__(self):
@@ -932,6 +963,22 @@ class OpOverload(OperatorBase, Generic[_P, _T]):
     # particular input 'key'.
     def _uncache_dispatch(self, key: DispatchKey) -> None:
         self._dispatch_cache.pop(key, None)
+
+    def _is_pyobj_dispatcher_enabled(self) -> bool:
+        return self._pyobj_dispatcher is not None
+
+    def _enable_pyobj_dispatch(self, is_enabled: bool = True) -> None:
+        if not is_enabled:
+            self._pyobj_dispatcher = None
+            self._op = self._cpp_dispatch_handle
+            return
+        dispatch, redispatch = torch._C._dispatch_make_pyobj_dispatch_fns(
+            self._handle,
+            self._cpp_dispatch_handle,
+            self._handle.redispatch_boxed,
+        )
+        self._pyobj_dispatcher = _PyObjectDispatcher(dispatch, redispatch)
+        self._op = dispatch
 
     # This implements the pre-computation logic for the Python dispatcher.
     def _get_dispatch(self, key: DispatchKey) -> DispatchKey | Callable[_P, _T]:
