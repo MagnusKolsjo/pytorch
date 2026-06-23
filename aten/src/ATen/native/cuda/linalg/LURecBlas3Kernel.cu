@@ -653,6 +653,7 @@ void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Te
   NoTF32Guard disable_tf32;
 
   auto handle = at::cuda::getCurrentCUDABlasHandle();
+
   // Zero infos out
   infos.zero_();
 
