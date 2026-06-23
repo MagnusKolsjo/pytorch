@@ -93,14 +93,15 @@ struct LUWorkspace {
 template <typename scalar_t>
 __global__ void build_trsm_ptr_kernel(
   scalar_t* __restrict__ dA, int64_t matrix_stride, int lda, int batch_count,
-  scalar_t** __restrict__ dL11_array, int row_off_L11, int col_off_L11,
-  scalar_t** __restrict__ dA12_array, int row_off_A12, int col_off_A12
+  scalar_t** __restrict__ dL11_array,
+  scalar_t** __restrict__ dA12_array,
+  int diag_offset, int panel_width
 ) {
   int b = blockIdx.x * blockDim.x + threadIdx.x;
   if (b >= batch_count) return;
   auto* base = dA + b * matrix_stride;
-  dL11_array[b] = base + row_off_L11 + static_cast<size_t>(col_off_L11) * lda;
-  dA12_array[b] = base + row_off_A12 + static_cast<size_t>(col_off_A12) * lda;
+  dL11_array[b] = base + diag_offset + static_cast<size_t>(diag_offset) * lda;
+  dA12_array[b] = base + diag_offset + static_cast<size_t>(diag_offset + panel_width) * lda;
 }
 
 template <typename scalar_t>
@@ -109,16 +110,16 @@ void build_trsm_ptrs_device(
   int64_t matrix_stride,
   LUWorkspace<scalar_t>& ws,
   int lda,
-  int row_off_L11, int col_off_L11,
-  int row_off_A12, int col_off_A12
+  int diag_offset,
+  int panel_width
 ) {
   int bc = ws.batch_count;
   int constexpr threads = 64;
   int blocks = (bc + threads - 1) / threads;
   build_trsm_ptr_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
     dA, matrix_stride, lda, bc,
-    ws.dL11_array, row_off_L11, col_off_L11,
-    ws.dA12_array, row_off_A12, col_off_A12
+    ws.dL11_array, ws.dA12_array,
+    diag_offset, panel_width
   );
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -401,8 +402,7 @@ void lu_batched_panel_recursive(
 
   build_trsm_ptrs_device<scalar_t>(
     dA, matrix_stride, ws, lda,
-    col_start, col_start,
-    col_start, col_start + n1
+    col_start, n1
   );
 
   auto constexpr one = static_cast<scalar_t>(1);
@@ -542,8 +542,7 @@ void lu_batched_blas3_kernel_impl(
       // A12 at (j, j + actual_nb): actual_nb x n_right - overwritten with U12
       build_trsm_ptrs_device<scalar_t>(
         dA, matrix_stride, ws, lda,
-        j, j,
-        j, j + actual_nb
+        j, actual_nb
       );
 
       auto constexpr one = static_cast<scalar_t>(1);
