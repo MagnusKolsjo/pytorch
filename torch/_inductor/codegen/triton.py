@@ -3136,8 +3136,22 @@ def _may_use_xmask_unswitch(kernel: TritonKernel) -> bool:
     """
     if not config.triton.xmask_unswitch:
         return False
-    xtree = kernel.range_trees[0]
+    device = V.graph.current_device
+    if device is None or not utils.is_gpu(device.type):
+        return False
+    xtree = _get_xmask_unswitch_tree(kernel)
+    if xtree is None:
+        return False
     return not isinstance(xtree.numel, (sympy.Integer, int))
+
+
+def _get_xmask_unswitch_tree(kernel: TritonKernel) -> IterationRangesRoot | None:
+    # 2D pointwise tiling can order range_trees as y, x, so find x by prefix
+    # instead of assuming a fixed position.
+    for tree in kernel.range_trees:
+        if tree.prefix == "x":
+            return tree
+    return None
 
 
 class TritonKernel(SIMDKernel[TritonCSEVariable]):
@@ -3205,6 +3219,7 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
             self.init_cooperative_reduction()
 
         self.codegen_range_tree()
+        self._may_use_xmask_unswitch = _may_use_xmask_unswitch(self)
 
         if self.cooperative_reduction:
             self.init_cooperative_reduction_mask()
@@ -3217,7 +3232,7 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         return sum(int(tree.tensor_dim is not None) for tree in self.range_trees)
 
     def _is_xmask_unswitchable_indexing(self, indexing: IndexingOptions) -> bool:
-        return _may_use_xmask_unswitch(self) and indexing.mask_vars == OrderedSet(
+        return self._may_use_xmask_unswitch and indexing.mask_vars == OrderedSet(
             ["xmask"]
         )
 
@@ -7040,9 +7055,9 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
             self.body.splice(self.stores)
 
         if self._use_xmask_unswitch:
-            xtree = self.range_trees[0]
-            if xtree.prefix != "x":
-                raise AssertionError(f"expected xtree prefix 'x', got {xtree.prefix!r}")
+            xtree = _get_xmask_unswitch_tree(self)
+            if xtree is None:
+                raise AssertionError("expected an xmask unswitch range tree")
 
             block_var = f"{xtree.prefix.upper()}BLOCK"
             predicate = f"{xtree.prefix}offset + {block_var} <= {xtree.prefix}numel"
