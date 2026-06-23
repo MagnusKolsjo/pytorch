@@ -331,6 +331,7 @@ class MiscTests(torch._inductor.test_case.TestCase):
             self.assertIn("6", val[1]._tensors)
             self.assertEqual(val[1]._tensors["6"], inp + 2)
 
+    @torch._dynamo.config.patch(canonicalize_output_graph_node_order=False)
     def test_dynamo_inside_custom_op(self):
         cnt = torch._dynamo.testing.InductorAndRecordGraphs()
         cnt1 = torch._dynamo.testing.InductorAndRecordGraphs()
@@ -15982,9 +15983,9 @@ with torch.library._scoped_library("mylib_ci", "FRAGMENT") as lib:
                 """\
 def forward(self, L_x_ : torch.Tensor):
     l_x_ = L_x_
-    a = l_x_.sin();  l_x_ = None
-    b = a.cos();  a = None
-    return (b,)""",
+    sin = l_x_.sin();  l_x_ = None
+    cos = sin.cos();  sin = None
+    return (cos,)""",
             )
 
     @torch._dynamo.config.patch(trace_autograd_ops=True)
