@@ -15,8 +15,10 @@
 
 #include <ATen/ceil_div.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAAllocatorConfig.h>
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/util/ScopeExit.h>
 #include <c10/util/error.h>
 #include <mutex>
 #include <c10/util/flat_hash_map.h>
@@ -45,6 +47,7 @@ struct NCCLAllocation {
   size_t buffer_size;
   size_t signal_pad_size;
   int device_idx;
+  bool use_expandable_segments_;
   std::mutex mutex;
   // Map of group name to peer alloc info
   ska::flat_hash_map<std::string, c10::intrusive_ptr<NCCLPeerAllocInfo>>
@@ -54,11 +57,13 @@ struct NCCLAllocation {
       void* ptr,
       size_t buffer_size,
       size_t signal_pad_size,
-      int device_idx)
+      int device_idx,
+      bool use_expandable_segments)
       : ptr(ptr),
         buffer_size(buffer_size),
         signal_pad_size(signal_pad_size),
-        device_idx(device_idx) {}
+        device_idx(device_idx),
+        use_expandable_segments_(use_expandable_segments) {}
 
   ~NCCLAllocation() {
     // Avoid calling CUDA functions after driver shutting down
@@ -66,11 +71,17 @@ struct NCCLAllocation {
       return;
     }
     c10::cuda::CUDAGuard guard(device_idx);
-    // Single free for the combined buffer + signal pad region.
-    ncclResult_t res = ncclMemFree(ptr);
-    if (res != ncclSuccess) {
+    // Single free for the combined buffer + signal pad region. If we allocated
+    // via expandable segments, free via raw_delete; otherwise free via
+    // ncclMemFree.
+    if (use_expandable_segments_) {
+      c10::cuda::CUDACachingAllocator::raw_delete(ptr);
+    } else {
+      ncclResult_t res = ncclMemFree(ptr);
+      if (res != ncclSuccess) {
         LOG(WARNING) << "ncclMemFree failed in NCCLAllocation dtor: "
-                      << ncclGetErrorString(res);
+                     << ncclGetErrorString(res);
+      }
     }
   }
 };
@@ -471,21 +482,47 @@ class NCCLSymmetricMemoryAllocator : public SymmetricMemoryAllocator {
         "must not be called with a group_name");
 
     c10::cuda::CUDAGuard guard(device_idx);
-    // Allocate buffer + signal pad together in a single ncclMemAlloc call.
-    // Buffer occupies [0, size); signal pad starts at round_up(size, 16).
-    // A single window is registered over the whole region at rendezvous
-    // time, so only the base pointer (already granularity-aligned by
-    // ncclMemAlloc) needs to satisfy NCCL's window-alignment requirement.
+    // Allocate buffer + signal pad together in one call. Buffer occupies
+    // [0, size); signal pad starts at round_up(size, 16). A single window is
+    // registered over the whole region at rendezvous time, so only the base
+    // pointer needs to satisfy NCCL's window-alignment requirement.
     const size_t signal_pad_size = get_signal_pad_size();
     const size_t total_size = at::round_up(size, 16UL) + signal_pad_size;
-    void* ptr;
-    C10D_NCCL_CHECK(ncclMemAlloc(&ptr, total_size), "ncclMemAlloc");
+    const bool use_expandable_segments =
+        c10::cuda::CUDACachingAllocator::CUDAAllocatorConfig::
+            expandable_segments();
+    void* ptr = nullptr;
+    if (use_expandable_segments) {
+      // With expandable_segments we allocate via the caching allocator's
+      // expandable-segment path. This is incompatible with symmetric memory's
+      // implicit CUDA MemPool: the pool uses this allocator as its backing
+      // (segment) allocator, so raw_alloc would route right back into this
+      // alloc() to create a segment, recursing forever with ever-growing
+      // sizes. Detect that re-entry and fail with an actionable message instead
+      // of hanging.
+      static thread_local bool in_expandable_alloc = false;
+      TORCH_CHECK(
+          !in_expandable_alloc,
+          "NCCLSymmetricMemoryAllocator::alloc was re-entered while allocating "
+          "expandable_segments-backed memory. Symmetric memory's implicit CUDA "
+          "MemPool is incompatible with expandable_segments. Disable it by "
+          "setting the environment variable TORCH_SYMMMEM_IMPLICIT_POOL=0.");
+      in_expandable_alloc = true;
+      auto reset_in_expandable_alloc =
+          c10::make_scope_exit([&]() { in_expandable_alloc = false; });
+      // cuMemMap-backed expandable segments are granularity-aligned by the CUDA
+      // driver, satisfying NCCL's window-registration alignment requirement
+      // (same guarantee ncclMemAlloc provides for the non-expandable path).
+      ptr = c10::cuda::CUDACachingAllocator::raw_alloc(total_size);
+    } else {
+      C10D_NCCL_CHECK(ncclMemAlloc(&ptr, total_size), "ncclMemAlloc");
+    }
     {
       std::lock_guard<std::mutex> lock(mutex_);
       allocations_.emplace(
           ptr,
           std::make_unique<NCCLAllocation>(
-              ptr, size, signal_pad_size, device_idx));
+              ptr, size, signal_pad_size, device_idx, use_expandable_segments));
     }
     return ptr;
   }
