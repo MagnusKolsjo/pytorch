@@ -21,6 +21,7 @@ from torch._decomp.decompositions import (
     _grid_sampler_2d as decomp_grid_sampler_2d,
     _index_add,
     embedding_dense_backward as decomp_embedding_dense_backward,
+    max_pool2d_with_indices_backward as decomp_max_pool2d_with_indices_backward,
     pw_cast_for_opmath,
     pw_cast_for_opmath_non_tensor_args,
 )
@@ -79,7 +80,6 @@ inductor_decompositions = get_decompositions(
         aten.leaky_relu,
         aten.linalg_vector_norm,
         aten._log_softmax,
-        aten.max_pool2d_with_indices_backward,
         aten._native_batch_norm_legit,
         aten._native_batch_norm_legit_functional,
         aten._native_batch_norm_legit_no_training,
@@ -120,6 +120,7 @@ decomps_to_exclude: list[torch._ops.OpOverload | torch._ops.OpOverloadPacket] = 
     aten.clamp_max,
     aten.clamp_min,
     aten.embedding_dense_backward,  # we fall back on xpu
+    aten.max_pool2d_with_indices_backward,  # we fall back on xpu
     aten.native_layer_norm,  # we fall back on mtia
     aten.index_add,  # we conditionally call this decomp
     aten.glu,  # inductor lowers this directly
@@ -186,6 +187,24 @@ def _lerp_tensor(
     w = torch.where(mask, neg_omw, weight)
     base = torch.where(mask, end, start)
     return torch.addcmul(base, w, diff, value=1)
+
+
+@register_decomposition(aten.max_pool2d_with_indices_backward)
+def _max_pool2d_with_indices_backward(
+    grad_output: torch.Tensor,
+    self: torch.Tensor,
+    kernel_size,
+    stride,
+    padding,
+    dilation,
+    ceil_mode: bool,
+    indices: torch.Tensor,
+) -> torch.Tensor:
+    if grad_output.is_xpu:
+        return NotImplemented
+    return decomp_max_pool2d_with_indices_backward(
+        grad_output, self, kernel_size, stride, padding, dilation, ceil_mode, indices
+    )
 
 
 @register_decomposition([aten.embedding_dense_backward])
