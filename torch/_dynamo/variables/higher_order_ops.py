@@ -2257,6 +2257,33 @@ def add_hop_context(cls: type[HOP_VT_Alias]) -> type[HOP_VT_Alias]:
                 e._hop_name = self._HOP_NAME  # pyrefly: ignore[missing-attribute]
             raise
         except (Unsupported, ObservedException) as e:
+            # ObservedExceptions from fake tensor eval carry VariableTracker
+            # args — re-raise as TorchRuntimeError to preserve error semantics.
+            if (
+                isinstance(e, ObservedException)
+                and e.args
+                and isinstance(e.args[0], VariableTracker)
+            ):
+                from torch._dynamo import graph_break_hints
+                from torch._dynamo.exc import (
+                    format_graph_break_message,
+                    TorchRuntimeError,
+                )
+
+                msg = (
+                    e.args[0].as_python_constant()
+                    if hasattr(e.args[0], "as_python_constant")
+                    else str(e.args[0])
+                )
+                formatted = format_graph_break_message(
+                    gb_type="RuntimeError when making fake tensor call",
+                    context="",
+                    explanation=msg,
+                    hints=[*graph_break_hints.USER_ERROR],
+                )
+                raise TorchRuntimeError(
+                    formatted, getattr(e, "real_stack", None)
+                ) from None
             # Only tag if not already tagged (reports deepest HOP only)
             if hasattr(e, "_hop_name"):
                 raise
