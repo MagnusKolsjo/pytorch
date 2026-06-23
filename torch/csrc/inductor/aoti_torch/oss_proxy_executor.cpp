@@ -211,9 +211,8 @@ void OSSProxyExecutor::prefill_stack_with_static_arguments(
       std::string device_string = serialized_arg_val["type"].get<std::string>();
       if (serialized_arg_val.contains("index") &&
           serialized_arg_val["index"].is_number()) {
-        auto index = serialized_arg_val["index"].get<int>();
-        device_string += ":" + std::to_string(index);
-        device_->set_index(static_cast<int8_t>(index));
+        device_string +=
+            ":" + std::to_string(serialized_arg_val["index"].get<int>());
       }
 
       c10::Device device(device_string);
