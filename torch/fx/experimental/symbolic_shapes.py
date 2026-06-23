@@ -6712,6 +6712,12 @@ class ShapeEnv:
             vr_sloc = self.var_to_range_sloc[symbol]
 
             if not sources:
+                # A symbol can be observed through a compound tracked input
+                # expression (for example, offsets.size(0) == batch + 1)
+                # without being directly bound by that input.  In that case,
+                # use the symbol's creation source to render its range guard.
+                sources = self.var_to_sources.get(symbol, [])
+            if not sources:
                 raise AssertionError(f"sources must not be empty for symbol {symbol}")
             bounds: list[sympy.Basic] = []
             rf = source_ref(sources[0])
