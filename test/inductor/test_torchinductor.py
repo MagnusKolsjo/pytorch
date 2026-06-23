@@ -18667,6 +18667,22 @@ if RUN_GPU or HAS_MPS:
         common = check_model_gpu
         device = GPU_TYPE
 
+        @requires_cuda_and_triton
+        def test_complex_view_as_complex_exact_stride_copy(self):
+            if self.device != "cuda":
+                self.skipTest("requires CUDA")
+
+            def fn(x):
+                y = x.transpose(1, 2)
+                z = y.reshape(2, 8, 4, -1, 2)
+                return torch.view_as_complex(z)
+
+            x = torch.randn([2, 4, 8, 8], device=self.device, dtype=torch.float32)
+            expected = fn(x)
+            actual = torch.compile(fn, fullgraph=True)(x)
+
+            self.assertEqual(actual, expected, exact_stride=True)
+
     copy_tests(CommonTemplate, GPUTests, GPU_TYPE)
 
 if RUN_TPU:

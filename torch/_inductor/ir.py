@@ -7560,16 +7560,29 @@ class ExternKernel(InputsKernel):
 
         # Although this is a clone, inductor is good about fusing clones into previous
         # operations if they weren't realized and their layouts were flexible.
-        x = cls.copy_input(x)
+        has_fixed_layout = False
+        if exact_strides is not None and x.get_dtype().is_complex:
+            src = x
+            x = torch._inductor.lowering.empty_strided(
+                x.get_size(),
+                exact_strides,
+                dtype=x.get_dtype(),
+                device=x.get_device_or_error(),
+            )
+            InplaceCopyFallback.create(x, src)
+            has_fixed_layout = True
+        else:
+            x = cls.copy_input(x)
 
-        as_storage_and_layout(
-            x,
-            freeze=True,
-            want_contiguous=False,
-            stride_order=order,
-            allow_padding=allow_padding,
-            exact_strides=exact_strides,
-        )
+        if not has_fixed_layout:
+            as_storage_and_layout(
+                x,
+                freeze=True,
+                want_contiguous=False,
+                stride_order=order,
+                allow_padding=allow_padding,
+                exact_strides=exact_strides,
+            )
         if (
             order
             and not free_unbacked_symbols(x.get_size())
