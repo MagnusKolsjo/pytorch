@@ -4206,6 +4206,31 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
             self.assertEqual(cnts.frame_count, 1)
             self.assertEqual(cnts.op_count, 1)  # mul_
 
+    def test_direct_aten_set_unsupported(self):
+        def set_packet(x, y):
+            out = torch.ops.aten.set(x, source=y)
+            return torch.ops.aten.lift(out)
+
+        def set_overload(x, y):
+            out = torch.ops.aten.set.source_Tensor(x, y)
+            return torch.ops.aten.lift(out)
+
+        for fn in (set_packet, set_overload):
+            x = torch.randn(3, 4)
+            y = torch.randn(3, 4)
+
+            with self.assertRaisesRegex(
+                Unsupported, "Unsupported direct torch\\.ops\\.aten\\.set call"
+            ):
+                torch.compile(fn, backend="eager", fullgraph=True)(x, y)
+
+            torch._dynamo.reset()
+            self.assertEqual(
+                torch.compile(fn, backend="eager")(x.clone(), y.clone()),
+                fn(x.clone(), y.clone()),
+            )
+            torch._dynamo.reset()
+
     def test_out_variants_with_resizing_on_graph_inputs(self):
         def fn(x, y):
             return torch.cosh(x, out=y) + 1
