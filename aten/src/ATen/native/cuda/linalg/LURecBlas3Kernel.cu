@@ -521,8 +521,7 @@ void lu_batched_blas3_kernel_impl(
   LUWorkspace<scalar_t>& ws,
   const LUTuning& tuning
 ) {
-  // Disable TF32 in GEMMs for accuracy
-  NoTF32Guard disable_tf32;
+  // TF32 is disabled in the outer scope
 
   // Real/Complex panel config
   LUNbConfig nbc;
@@ -649,6 +648,9 @@ void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Te
   int64_t matrix_stride = matrixStride(input);
   // Assuming column-major input with lda >= max(1, m)
   int lda = std::max(cuda_int_cast(input.stride(-1), "input.stride(-1)"), std::max(1, m));
+
+  // Disable TF32 in GEMMs for accuracy
+  NoTF32Guard disable_tf32;
 
   auto handle = at::cuda::getCurrentCUDABlasHandle();
   // Zero infos out
