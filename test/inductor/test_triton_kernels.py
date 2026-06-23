@@ -167,6 +167,131 @@ class KernelTests(torch._inductor.test_case.TestCase):
         # No need to assert anything, the goal is to make sure dynamo does
         # not crash
 
+    @skipIfWindows(msg="AOTI/Cpp_Wrapper have not enabled on Windows")
+    @requires_gpu
+    @parametrize("cpp_wrapper", [False, True])
+    def test_data_ptr_packing(self, cpp_wrapper):
+        if cpp_wrapper and GPU_TYPE == "xpu":
+            self.skipTest("XPU cpp_wrapper data_ptr tracing is not supported yet")
+
+        @triton.jit
+        def add_kernel(xy, z, BLOCK_SIZE: "tl.constexpr", n_elements):
+            pid = tl.program_id(axis=0)
+            block_start = pid * BLOCK_SIZE
+            offsets = block_start + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < n_elements
+            x_ptr = tl.load(xy + 0).to(tl.pointer_type(tl.float32))
+            y_ptr = tl.load(xy + 1).to(tl.pointer_type(tl.float32))
+            tmp_ptr = tl.load(xy + 2).to(tl.pointer_type(tl.float32))
+
+            x = tl.load(x_ptr + offsets, mask=mask)
+            y = tl.load(y_ptr + offsets, mask=mask)
+            tmp = tl.load(tmp_ptr + offsets, mask=mask)
+            tl.store(z + offsets, x + y + tmp, mask=mask)
+
+        def f(x, y):
+            tmp = x + y
+            x_view = x[1:]
+            y_view = y[1:]
+            tmp_view = tmp[1:]
+            xy = torch.tensor(
+                [x_view.data_ptr(), y_view.data_ptr(), tmp_view.data_ptr()],
+                dtype=torch.long,
+                pin_memory=True,
+            ).to(device=x.device, non_blocking=True)
+            z = torch.empty_like(x_view)
+            n_elements = x_view.numel()
+            grid = (triton.cdiv(n_elements, 4),)
+            add_kernel[grid](xy, z, 4, n_elements)
+            return z, xy
+
+        x = torch.randn(18, device=GPU_TYPE)
+        y = torch.randn(18, device=GPU_TYPE)
+        with inductor_config.patch(cpp_wrapper=cpp_wrapper):
+            compiled = torch.compile(f, fullgraph=True)
+            (actual, packed_ptrs), codes = run_and_get_code(compiled, x, y)
+            torch.accelerator.synchronize()
+            self.assertEqual(actual, x[1:] + y[1:] + (x + y)[1:])
+            self.assertEqual(
+                packed_ptrs[:2].cpu(),
+                torch.tensor([x[1:].data_ptr(), y[1:].data_ptr()], dtype=torch.long),
+            )
+            self.assertNotEqual(packed_ptrs[2].item(), 0)
+            unaligned_x = torch.randn(19, device=GPU_TYPE)[1:]
+            unaligned_y = torch.randn(19, device=GPU_TYPE)[1:]
+            actual, packed_ptrs = compiled(unaligned_x, unaligned_y)
+            torch.accelerator.synchronize()
+            self.assertEqual(
+                actual,
+                unaligned_x[1:] + unaligned_y[1:] + (unaligned_x + unaligned_y)[1:],
+            )
+            self.assertEqual(
+                packed_ptrs[:2].cpu(),
+                torch.tensor(
+                    [unaligned_x[1:].data_ptr(), unaligned_y[1:].data_ptr()],
+                    dtype=torch.long,
+                ),
+            )
+            self.assertNotEqual(packed_ptrs[2].item(), 0)
+            code = "\n".join(codes)
+            if not cpp_wrapper:
+                self.assertNotIn("copy_if_misaligned", code)
+                self.assertNotIn("assert_alignment(arg0_1", code)
+                self.assertNotIn("assert_alignment(arg1_1", code)
+                self.assertNotIn("del arg0_1", code)
+                self.assertNotIn("del arg1_1", code)
+                self.assertIn(".record_stream(torch.accelerator.current_stream(", code)
+                launch_idx = code.index("add_kernel_0.run(")
+                marker = "torch.ops.prims._data_ptr.default("
+                for line in code.splitlines():
+                    if marker in line:
+                        source = line.split(marker, 1)[1].split(")", 1)[0]
+                        del_idx = code.find(f"del {source}")
+                        if del_idx != -1:
+                            self.assertGreater(del_idx, launch_idx)
+
+                if GPU_TYPE == "cuda":
+                    side_stream = torch.cuda.Stream()
+
+                    def f_stream(x, y):
+                        tmp = x + y
+                        x_view = x[1:]
+                        y_view = y[1:]
+                        tmp_view = tmp[1:]
+                        xy = torch.tensor(
+                            [
+                                x_view.data_ptr(),
+                                y_view.data_ptr(),
+                                tmp_view.data_ptr(),
+                            ],
+                            dtype=torch.long,
+                            pin_memory=True,
+                        ).to(device=x.device, non_blocking=True)
+                        z = torch.empty_like(x_view)
+                        n_elements = x_view.numel()
+                        grid = (triton.cdiv(n_elements, 4),)
+                        side_stream.wait_stream(torch.cuda.current_stream())
+                        with torch.cuda.stream(side_stream):
+                            add_kernel[grid](xy, z, 4, n_elements)
+                        return z, xy
+
+                    expected, _ = f_stream(x, y)
+                    side_stream.synchronize()
+                    compiled_stream = torch.compile(f_stream, fullgraph=True)
+                    (actual, _), stream_codes = run_and_get_code(compiled_stream, x, y)
+                    side_stream.synchronize()
+                    self.assertEqual(actual, expected)
+                    stream_code = "\n".join(stream_codes)
+                    self.assertIn("stream1 = get_external_object_by_index", stream_code)
+                    self.assertIn(".record_stream(stream1)", stream_code)
+            elif GPU_TYPE == "cuda":
+                sync_fn = (
+                    "hipDeviceSynchronize"
+                    if torch.version.hip
+                    else "cudaDeviceSynchronize"
+                )
+                self.assertIn(sync_fn, code)
+
     @requires_gpu
     def test_triton_kernel_dunder_name_no_name_mangling(self):
         # Regression test for https://github.com/pytorch/pytorch/issues/170398
