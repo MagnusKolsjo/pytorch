@@ -104,26 +104,6 @@ __global__ void build_trsm_ptr_kernel(
   dA12_array[b] = base + diag_offset + static_cast<size_t>(diag_offset + panel_width) * lda;
 }
 
-template <typename scalar_t>
-void build_trsm_ptrs_device(
-  scalar_t* dA,
-  int64_t matrix_stride,
-  LUWorkspace<scalar_t>& ws,
-  int lda,
-  int diag_offset,
-  int panel_width
-) {
-  int bc = ws.batch_count;
-  int constexpr threads = 64;
-  int blocks = (bc + threads - 1) / threads;
-  build_trsm_ptr_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-    dA, matrix_stride, lda, bc,
-    ws.dL11_array, ws.dA12_array,
-    diag_offset, panel_width
-  );
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
 // TRSM + GEMM trailing-matrix update.
 // Solves L11 \ A12 (TRSM), then updates A22 -= L21 @ U12 (GEMM).
 // All sub-blocks are relative to (diag_offset, diag_offset) on the diagonal:
@@ -146,10 +126,14 @@ void trailing_matrix_update(
 ) {
   if (n_right <= 0) return;
 
-  build_trsm_ptrs_device<scalar_t>(
-    dA, matrix_stride, ws, lda,
+  int constexpr threads = 64;
+  int blocks = (batch_count + threads - 1) / threads;
+  build_trsm_ptr_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+    dA, matrix_stride, lda, batch_count,
+    ws.dL11_array, ws.dA12_array,
     diag_offset, panel_width
   );
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   auto constexpr one = static_cast<scalar_t>(1);
   auto constexpr neg_one = static_cast<scalar_t>(-1);
@@ -382,8 +366,6 @@ void lu_batched_panel_recursive(
   LUWorkspace<scalar_t>& ws,
   const LUTuning& tuning
 ) {
-  if (nb <= 0) return;
-
   // Base case: use flat panel factorization
   if (nb <= tuning.recnb) {
     auto grid = dim3(1, 1, batch_count);
@@ -448,95 +430,6 @@ void lu_batched_panel_recursive(
   );
 }
 
-template <typename scalar_t>
-void lu_batched_blas3_kernel_impl(
-  cublasHandle_t handle,
-  scalar_t* dA,
-  int batch_count,
-  int m,
-  int n,
-  int64_t matrix_stride,
-  int lda,
-  int* dipiv,
-  int* dinfo,
-  LUWorkspace<scalar_t>& ws,
-  const LUTuning& tuning
-) {
-  // TF32 is disabled in the outer scope
-
-  // Real/Complex panel config
-  LUNbConfig nbc;
-  if constexpr (c10::is_complex<scalar_t>::value) {
-    nbc = tuning.nb_complex;
-  } else {
-    nbc = tuning.nb_real;
-  }
-
-  // Panel size (columns)
-  int nb;
-  if (n >= tuning.nb_crossover_n) {
-    nb = nbc.nb_large;
-  } else {
-    nb = nbc.nb_small;
-  }
-
-  auto min_mn = std::min(m, n);
-  auto ipiv_stride = min_mn;
-
-  // Right-looking blocked LU: step through columns in blocks of nb.
-  // Each iteration factors one panel of width actual_nb, then updates the
-  // trailing matrix to the right.
-  // The panel itself is factored recursively (splitting its width in half
-  // down to recnb, same algorithm as MAGMA's dgetrf_recpanel_batched).
-  for (int j = 0; j < min_mn; j += nb) {
-    auto actual_nb = std::min(nb, min_mn - j);
-
-    // 1. Panel factorization
-    // Factor columns [j, j + actual_nb) with rows [j, m).
-    // Produces L/U within the panel, and pivot indices ipiv[j:j + actual_nb].
-    // Pivots are global row indices (1-based) - rows may be swapped from
-    // anywhere in [j, m) into the panel.
-    lu_batched_panel_recursive<scalar_t>(
-      handle,
-      dA, matrix_stride, lda, m,
-      j, actual_nb,
-      dipiv, ipiv_stride, dinfo,
-      batch_count, ws, tuning
-    );
-
-    // 2. Propagate pivots to columns outside the panel
-    // The panel factorization only swapped rows within columns [j, j + actual_nb).
-    // We must apply the same row swaps to the left columns [0, j) and
-    // right columns [j + actual_nb, n) so the full row permutation is consistent.
-    batched_apply_pivots<scalar_t>(
-      dA, matrix_stride, lda,
-      j, actual_nb,
-      dipiv, ipiv_stride,
-      0, j, batch_count
-    );
-    batched_apply_pivots<scalar_t>(
-      dA, matrix_stride, lda,
-      j, actual_nb,
-      dipiv, ipiv_stride,
-      j + actual_nb, n, batch_count
-    );
-
-    // 3. Trailing matrix update
-    // After pivoting, the block row looks like:
-    //
-    // columns:    [0, j)  [j, j + nb)  [j + nb, n)
-    // row j:      done    L11 \ U11    U12 (need TRSM)
-    // row j + nb: done    L21          A22 (need GEMM)
-    //
-    // U12: solve L11 @ U12 = A[j:j + nb, j + nb:n] (TRSM)
-    // A22: A22 -= L21 @ U12, updating the trailing (m - j - nb) x (n - j - nb) block.
-    trailing_matrix_update<scalar_t>(
-      handle, dA, matrix_stride, ws, lda,
-      j, actual_nb, n - j - actual_nb, m - j - actual_nb, batch_count
-    );
-  } // for j in range(0, min(m, n), nb)
-}
-
 } // anonymous namespace
 
 void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Tensor& infos) {
@@ -545,27 +438,66 @@ void lu_batched_blas3_kernel(const Tensor& input, const Tensor& pivots, const Te
   int m = cuda_int_cast(input.size(-2), "input.size(-2)");
   int n = cuda_int_cast(input.size(-1), "input.size(-1)");
   int64_t matrix_stride = matrixStride(input);
-  // Assuming column-major input with lda >= max(1, m)
   int lda = std::max(cuda_int_cast(input.stride(-1), "input.stride(-1)"), std::max(1, m));
 
-  // Disable TF32 in GEMMs for accuracy
   NoTF32Guard disable_tf32;
-
   auto handle = at::cuda::getCurrentCUDABlasHandle();
-
-  // Zero infos out
   infos.zero_();
 
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(input.scalar_type(), "linalg_lu_batched_blas3_kernel", [&] {
-    // Workspace for T** arrays in TRSM
     auto ws = LUWorkspace<scalar_t>(input);
+    auto* dA = static_cast<scalar_t*>(input.data_ptr());
+    auto* dipiv = static_cast<int*>(pivots.data_ptr());
+    auto* dinfo = static_cast<int*>(infos.data_ptr());
 
-    lu_batched_blas3_kernel_impl<scalar_t>(
-      handle,
-      static_cast<scalar_t*>(input.data_ptr()), batch_count, m, n, matrix_stride, lda,
-      static_cast<int*>(pivots.data_ptr()), static_cast<int*>(infos.data_ptr()),
-      ws, tuning
-    );
+    LUNbConfig nbc;
+    if constexpr (c10::is_complex<scalar_t>::value) {
+      nbc = tuning.nb_complex;
+    } else {
+      nbc = tuning.nb_real;
+    }
+
+    int nb = (n >= tuning.nb_crossover_n) ? nbc.nb_large : nbc.nb_small;
+    auto min_mn = std::min(m, n);
+    auto ipiv_stride = min_mn;
+
+    // Right-looking blocked LU: step through columns in blocks of nb.
+    // Each iteration factors one panel of width actual_nb, then updates the
+    // trailing matrix to the right.
+    // The panel itself is factored recursively (splitting its width in half
+    // down to recnb, same algorithm as MAGMA's dgetrf_recpanel_batched).
+    for (int j = 0; j < min_mn; j += nb) {
+      auto actual_nb = std::min(nb, min_mn - j);
+
+      // 1. Panel factorization
+      lu_batched_panel_recursive<scalar_t>(
+        handle,
+        dA, matrix_stride, lda, m,
+        j, actual_nb,
+        dipiv, ipiv_stride, dinfo,
+        batch_count, ws, tuning
+      );
+
+      // 2. Propagate pivots to columns outside the panel
+      batched_apply_pivots<scalar_t>(
+        dA, matrix_stride, lda,
+        j, actual_nb,
+        dipiv, ipiv_stride,
+        0, j, batch_count
+      );
+      batched_apply_pivots<scalar_t>(
+        dA, matrix_stride, lda,
+        j, actual_nb,
+        dipiv, ipiv_stride,
+        j + actual_nb, n, batch_count
+      );
+
+      // 3. Trailing matrix update
+      trailing_matrix_update<scalar_t>(
+        handle, dA, matrix_stride, ws, lda,
+        j, actual_nb, n - j - actual_nb, m - j - actual_nb, batch_count
+      );
+    }
   });
 }
 
